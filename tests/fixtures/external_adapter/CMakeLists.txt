@@ -1,0 +1,3 @@
+add_library(tekla_db1_test_external_adapter STATIC adapter.cpp)
+target_link_libraries(tekla_db1_test_external_adapter PRIVATE tekla_db1::core)
+target_compile_features(tekla_db1_test_external_adapter PRIVATE cxx_std_20)

@@ -1,0 +1,144 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "dev",
+      "displayName": "Developer debug build",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "BUILD_TESTING": "ON",
+        "TEKLA_DB1_BUILD_GLTF": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Optimized release build",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "BUILD_TESTING": "ON",
+        "TEKLA_DB1_BUILD_GLTF": "ON"
+      }
+    },
+    {
+      "name": "ci",
+      "inherits": "release",
+      "displayName": "Strict CI build",
+      "binaryDir": "${sourceDir}/build/ci",
+      "cacheVariables": {
+        "TEKLA_DB1_WARNINGS_AS_ERRORS": "ON",
+        "TEKLA_DB1_BUILD_BENCHMARKS": "ON",
+        "TEKLA_DB1_EXTRA_ADAPTERS": "tests/fixtures/external_adapter"
+      }
+    },
+    {
+      "name": "asan",
+      "inherits": "dev",
+      "displayName": "Address and undefined behavior sanitizers",
+      "binaryDir": "${sourceDir}/build/asan",
+      "cacheVariables": {
+        "TEKLA_DB1_ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
+      "name": "occt",
+      "inherits": "ci",
+      "displayName": "Strict build with OCCT containment",
+      "binaryDir": "${sourceDir}/build/occt",
+      "cacheVariables": {
+        "TEKLA_DB1_ENABLE_OCCT": "ON"
+      }
+    },
+    {
+      "name": "benchmark",
+      "inherits": "release",
+      "displayName": "Synthetic release benchmark",
+      "binaryDir": "${sourceDir}/build/benchmark",
+      "cacheVariables": {
+        "TEKLA_DB1_BUILD_BENCHMARKS": "ON",
+        "TEKLA_DB1_BUILD_TOOLS": "OFF",
+        "TEKLA_DB1_BUILD_GLTF": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "ci",
+      "configurePreset": "ci"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan"
+    },
+    {
+      "name": "occt",
+      "configurePreset": "occt"
+    },
+    {
+      "name": "benchmark",
+      "configurePreset": "benchmark"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ci",
+      "configurePreset": "ci",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "occt",
+      "configurePreset": "occt",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "benchmark",
+      "configurePreset": "benchmark",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

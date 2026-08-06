@@ -1,0 +1,130 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake --preset ci
+
+      - name: Build
+        run: cmake --build --preset ci
+
+      - name: Test
+        run: ctest --preset ci
+
+      - name: Install
+        run: cmake --install build/ci --prefix "${{ runner.temp }}/tekla-db1-sdk"
+
+      - name: Verify tagged release artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: >-
+          cmake
+          "-DSOURCE_DIR=${{ github.workspace }}"
+          "-DINSTALL_PREFIX=${{ runner.temp }}/tekla-db1-sdk"
+          "-DEXPECTED_TAG=${{ github.ref_name }}"
+          "-DEXPECTED_SOURCE_REVISION=${{ github.sha }}"
+          -P cmake/VerifyReleaseArtifacts.cmake
+
+      - name: Configure installed-package consumer
+        run: cmake -S tests/consumer -B build/consumer -DCMAKE_PREFIX_PATH="${{ runner.temp }}/tekla-db1-sdk"
+
+      - name: Build installed-package consumer
+        run: cmake --build build/consumer --config Release
+
+      - name: Run installed-package consumer
+        run: ctest --test-dir build/consumer -C Release --output-on-failure
+
+      - name: Configure core-only installed-package consumer
+        run: cmake -S tests/consumer -B build/consumer-core -DCMAKE_PREFIX_PATH="${{ runner.temp }}/tekla-db1-sdk" -DTEKLA_DB1_CONSUMER_REQUIRE_GLTF=OFF
+
+      - name: Build core-only installed-package consumer
+        run: cmake --build build/consumer-core --config Release
+
+      - name: Run core-only installed-package consumer
+        run: ctest --test-dir build/consumer-core -C Release --output-on-failure
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset asan
+      - name: Build
+        run: cmake --build --preset asan
+      - name: Test
+        run: ctest --preset asan
+
+  occt-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OCCT development packages
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install -y
+          libocct-foundation-dev
+          libocct-modeling-data-dev
+          libocct-modeling-algorithms-dev
+
+      - name: Configure OCCT build
+        run: cmake --preset occt
+
+      - name: Build OCCT package
+        run: cmake --build --preset occt
+
+      - name: Test OCCT package
+        run: ctest --preset occt
+
+      - name: Install OCCT package
+        run: cmake --install build/occt --prefix "${{ runner.temp }}/tekla-db1-sdk-occt"
+
+      - name: Configure installed OCCT-package consumer
+        run: cmake -S tests/consumer -B build/consumer-occt -DCMAKE_PREFIX_PATH="${{ runner.temp }}/tekla-db1-sdk-occt"
+
+      - name: Build installed OCCT-package consumer
+        run: cmake --build build/consumer-occt --config Release
+
+      - name: Run installed OCCT-package consumer
+        run: ctest --test-dir build/consumer-occt -C Release --output-on-failure
+
+      - name: Smoke-test installed OCCT worker
+        run: '"${{ runner.temp }}/tekla-db1-sdk-occt/bin/tekla-db1-occt-worker" < /dev/null'
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure bounded libFuzzer gate
+        run: >-
+          cmake -S . -B build/fuzz -G Ninja
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DBUILD_TESTING=OFF
+          -DTEKLA_DB1_BUILD_TOOLS=OFF
+          -DTEKLA_DB1_BUILD_GLTF=OFF
+          -DTEKLA_DB1_BUILD_FUZZERS=ON
+          -DTEKLA_DB1_ENABLE_SANITIZERS=ON
+      - name: Build fuzzer and synthetic seed corpus
+        run: cmake --build build/fuzz
+      - name: Run bounded fuzz gate
+        run: >-
+          build/fuzz/fuzz/tekla_db1_container_fuzz
+          build/fuzz/fuzz/corpus
+          -dict=fuzz/container.dict
+          -max_total_time=30
+          -rss_limit_mb=2048

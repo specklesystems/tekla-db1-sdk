@@ -1,0 +1,21 @@
+/build/
+/build-*/
+/out/
+/.cache/
+/CMakeUserPresets.json
+/compile_commands.json
+.idea/
+.vscode/
+.DS_Store
+
+# Local model inputs and generated validation artifacts.
+*.db1
+*.db2
+*.db
+*.bin
+*.dll
+*.dylib
+*.so
+*.tx
+/test-data/
+/validation-output/

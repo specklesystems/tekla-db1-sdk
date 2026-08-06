@@ -1,0 +1,16 @@
+#pragma once
+
+#include <cstdint>
+#include <string_view>
+
+namespace tekla::db1 {
+
+// clang-format off
+inline constexpr std::uint32_t version_major = @PROJECT_VERSION_MAJOR@;
+inline constexpr std::uint32_t version_minor = @PROJECT_VERSION_MINOR@;
+inline constexpr std::uint32_t version_patch = @PROJECT_VERSION_PATCH@;
+inline constexpr std::string_view version = "@PROJECT_VERSION@";
+inline constexpr std::string_view source_revision = "@TEKLA_DB1_CONFIGURED_SOURCE_REVISION@";
+// clang-format on
+
+}  // namespace tekla::db1

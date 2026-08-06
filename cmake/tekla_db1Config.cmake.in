@@ -1,0 +1,22 @@
+@PACKAGE_INIT@
+
+set(tekla_db1_SOURCE_REVISION "@TEKLA_DB1_CONFIGURED_SOURCE_REVISION@")
+
+include(CMakeFindDependencyMacro)
+find_dependency(ZLIB)
+if(@TEKLA_DB1_ENABLE_OCCT@)
+  find_dependency(OpenCASCADE COMPONENTS
+    FoundationClasses ModelingData ModelingAlgorithms)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/tekla_db1Targets.cmake")
+
+foreach(_tekla_db1_component IN LISTS tekla_db1_FIND_COMPONENTS)
+  if(TARGET "tekla_db1::${_tekla_db1_component}")
+    set("tekla_db1_${_tekla_db1_component}_FOUND" TRUE)
+  else()
+    set("tekla_db1_${_tekla_db1_component}_FOUND" FALSE)
+  endif()
+endforeach()
+
+check_required_components(tekla_db1)
