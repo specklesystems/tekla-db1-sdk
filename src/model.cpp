@@ -91,6 +91,7 @@ Result<ProcessStream> Model::process(const ProcessRequest& request) const {
   constexpr auto supported = static_cast<std::uint32_t>(Stage::identities) |
                              static_cast<std::uint32_t>(Stage::properties) |
                              static_cast<std::uint32_t>(Stage::relations) |
+                             static_cast<std::uint32_t>(Stage::semantic_relations) |
                              static_cast<std::uint32_t>(Stage::instances) |
                              static_cast<std::uint32_t>(Stage::component_definitions) |
                              static_cast<std::uint32_t>(Stage::definition_geometry) |
@@ -119,6 +120,11 @@ Result<ProcessStream> Model::process(const ProcessRequest& request) const {
   }
   if (contains(request.stages, Stage::relations)) {
     auto result = append(detail::make_relation_stream(impl_->storage, *schema.value(), request));
+    if (!result) return Result<ProcessStream>::failure(result.error());
+  }
+  if (contains(request.stages, Stage::semantic_relations)) {
+    auto result =
+        append(detail::make_semantic_relation_stream(impl_->storage, *schema.value(), request));
     if (!result) return Result<ProcessStream>::failure(result.error());
   }
   if (contains(request.stages, Stage::instances) ||

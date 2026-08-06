@@ -154,6 +154,7 @@ void format_guid(std::span<const std::byte, 16> bytes, std::array<char, 36>& out
   if (type == 11U) return ObjectKind::boolean_part;
   if (type == 12U) return ObjectKind::cut_plane;
   if (type == 13U) return ObjectKind::weld;
+  if (type == 15U) return ObjectKind::assembly;
   if (type == 30U && subtype == 3U) return ObjectKind::grid_plane;
   if (type == 47U) {
     if (subtype == 0U) return ObjectKind::single_rebar;

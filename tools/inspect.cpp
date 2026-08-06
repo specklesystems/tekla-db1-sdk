@@ -95,6 +95,9 @@ int main(int argc, char** argv) {
   std::uint64_t visible_object_count = 0;
   std::uint64_t property_count = 0;
   std::uint64_t relation_count = 0;
+  std::uint64_t subelement_count = 0;
+  std::uint64_t assembly_membership_count = 0;
+  std::uint64_t assembly_count = 0;
   std::uint64_t instance_count = 0;
   std::uint64_t persisted_component_child_count = 0;
   std::uint64_t available_component_definition_count = 0;
@@ -115,8 +118,10 @@ int main(int argc, char** argv) {
         include_geometry
             ? tekla::db1::Stage::definition_geometry | tekla::db1::Stage::display_geometry
         : include_component_definitions ? tekla::db1::Stage::component_definitions
-        : include_semantics ? tekla::db1::Stage::identities | tekla::db1::Stage::properties |
-                                  tekla::db1::Stage::relations | tekla::db1::Stage::instances
+        : include_semantics
+            ? tekla::db1::Stage::identities | tekla::db1::Stage::properties |
+                  tekla::db1::Stage::relations | tekla::db1::Stage::semantic_relations |
+                  tekla::db1::Stage::instances
         : include_instances ? tekla::db1::Stage::identities | tekla::db1::Stage::instances
                             : tekla::db1::Stage::identities;
     const auto process_started = std::chrono::steady_clock::now();
@@ -138,11 +143,19 @@ int main(int argc, char** argv) {
         object_count += batch.value().objects.size();
         for (const auto& object : batch.value().objects) {
           visible_object_count += object.visible ? 1U : 0U;
+          assembly_count += object.kind == tekla::db1::ObjectKind::assembly ? 1U : 0U;
         }
       } else if (batch.value().kind == tekla::db1::BatchKind::properties) {
         property_count += batch.value().properties.size();
       } else if (batch.value().kind == tekla::db1::BatchKind::relations) {
         relation_count += batch.value().relations.size();
+      } else if (batch.value().kind == tekla::db1::BatchKind::semantic_relations) {
+        for (const auto& relation : batch.value().semantic_relations) {
+          subelement_count +=
+              relation.kind == tekla::db1::SemanticRelationKind::subelement ? 1U : 0U;
+          assembly_membership_count +=
+              relation.kind == tekla::db1::SemanticRelationKind::in_assembly ? 1U : 0U;
+        }
       } else if (batch.value().kind == tekla::db1::BatchKind::instances) {
         instance_count += batch.value().instances.size();
         for (const auto& instance : batch.value().instances) {
@@ -212,6 +225,11 @@ int main(int argc, char** argv) {
       std::printf(",\n  \"property_count\": %llu,\n",
                   static_cast<unsigned long long>(property_count));
       std::printf("  \"relation_count\": %llu,\n", static_cast<unsigned long long>(relation_count));
+      std::printf("  \"subelement_count\": %llu,\n",
+                  static_cast<unsigned long long>(subelement_count));
+      std::printf("  \"assembly_count\": %llu,\n", static_cast<unsigned long long>(assembly_count));
+      std::printf("  \"assembly_membership_count\": %llu,\n",
+                  static_cast<unsigned long long>(assembly_membership_count));
       std::printf("  \"instance_count\": %llu,\n", static_cast<unsigned long long>(instance_count));
       std::printf("  \"persisted_component_child_count\": %llu,\n",
                   static_cast<unsigned long long>(persisted_component_child_count));

@@ -390,6 +390,195 @@ class RelationReader final : public BatchReader {
   std::vector<RelationView> batch_;
 };
 
+struct SemanticObject {
+  std::uint32_t id = 0;
+  std::uint32_t parent_id = 0;
+};
+
+struct SemanticEdgeKey {
+  std::uint32_t source_id = 0;
+  std::uint32_t target_id = 0;
+
+  friend bool operator==(const SemanticEdgeKey&, const SemanticEdgeKey&) = default;
+};
+
+struct SemanticEdgeKeyHash {
+  [[nodiscard]] std::size_t operator()(const SemanticEdgeKey& key) const noexcept {
+    auto hash = std::hash<std::uint32_t>{}(key.source_id);
+    hash ^= std::hash<std::uint32_t>{}(key.target_id) + 0x9e3779b9U + (hash << 6U) + (hash >> 2U);
+    return hash;
+  }
+};
+
+using AssemblyMembers = std::unordered_map<std::uint32_t, std::vector<std::uint32_t>>;
+
+class SemanticRelationReader final : public BatchReader {
+ public:
+  SemanticRelationReader(std::shared_ptr<const ModelStorage> storage,
+                         std::vector<SemanticObject> objects,
+                         std::unordered_set<std::uint32_t> endpoints,
+                         const TableLayout* relation_layout,
+                         const TableSchema* relation_schema,
+                         std::array<std::uint32_t, 4> relation_offsets,
+                         std::vector<std::uint32_t> assembly_order,
+                         std::unordered_map<std::uint32_t, std::uint32_t> main_members,
+                         AssemblyMembers assembly_members, std::size_t batch_size)
+      : storage_(std::move(storage)),
+        objects_(std::move(objects)),
+        endpoints_(std::move(endpoints)),
+        relation_layout_(relation_layout),
+        relation_schema_(relation_schema),
+        relation_offsets_(relation_offsets),
+        assembly_order_(std::move(assembly_order)),
+        main_members_(std::move(main_members)),
+        assembly_members_(std::move(assembly_members)),
+        batch_size_(batch_size) {
+    batch_.reserve(batch_size_);
+    subelements_.reserve(objects_.size());
+  }
+
+  Result<BatchView> next() override {
+    batch_.clear();
+    while (batch_.size() < batch_size_ && phase_ != Phase::done) {
+      if (phase_ == Phase::parents) {
+        emit_parents();
+      } else if (phase_ == Phase::stored_relations) {
+        auto emitted = emit_stored_relations();
+        if (!emitted) return Result<BatchView>::failure(emitted.error());
+      } else {
+        emit_assembly_memberships();
+      }
+    }
+    if (batch_.empty() && phase_ == Phase::done) {
+      return Result<BatchView>::success(BatchView{.kind = BatchKind::end});
+    }
+    return Result<BatchView>::success(
+        BatchView{.kind = BatchKind::semantic_relations, .semantic_relations = batch_});
+  }
+
+ private:
+  enum class Phase {
+    parents,
+    stored_relations,
+    assemblies,
+    done,
+  };
+
+  [[nodiscard]] bool valid_edge(std::uint32_t source, std::uint32_t target) const {
+    return source != 0U && target != 0U && source != target && endpoints_.contains(source) &&
+           endpoints_.contains(target);
+  }
+
+  bool append_subelement(std::uint32_t parent, std::uint32_t child,
+                         SemanticRelationOrigin origin, std::uint32_t source_relation_id = 0U) {
+    if (!valid_edge(parent, child) || !subelements_.insert({parent, child}).second) return false;
+    batch_.push_back(SemanticRelationView{
+        .kind = SemanticRelationKind::subelement,
+        .source_id = parent,
+        .target_id = child,
+        .ordinal = child_ordinals_[parent]++,
+        .origin = origin,
+        .source_relation_id = source_relation_id,
+    });
+    return true;
+  }
+
+  void emit_parents() {
+    while (object_offset_ < objects_.size() && batch_.size() < batch_size_) {
+      const auto& object = objects_[object_offset_++];
+      append_subelement(object.parent_id, object.id, SemanticRelationOrigin::object_parent);
+    }
+    if (object_offset_ == objects_.size()) phase_ = Phase::stored_relations;
+  }
+
+  Result<bool> emit_stored_relations() {
+    if (relation_layout_ == nullptr || relation_schema_ == nullptr) {
+      phase_ = Phase::assemblies;
+      return Result<bool>::success(false);
+    }
+    const auto payload = storage_->payload.bytes();
+    while (relation_row_ < relation_layout_->info.row_count && batch_.size() < batch_size_) {
+      const auto record = relation_layout_->record(payload, relation_row_++);
+      if (record.empty()) {
+        return Result<bool>::failure(
+            {ErrorCode::invalid_container, "A relation record lies outside the payload."});
+      }
+      if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0) continue;
+      const auto tuple = record.subspan(1, relation_schema_->tuple_size);
+      const auto relation_type = read_u32(tuple, relation_offsets_[1]);
+      if (relation_type != 7U && relation_type != 11U && relation_type != 12U) continue;
+      append_subelement(read_u32(tuple, relation_offsets_[2]),
+                        read_u32(tuple, relation_offsets_[3]),
+                        SemanticRelationOrigin::stored_relation,
+                        read_u32(tuple, relation_offsets_[0]));
+    }
+    if (relation_row_ == relation_layout_->info.row_count) phase_ = Phase::assemblies;
+    return Result<bool>::success(true);
+  }
+
+  void emit_assembly_memberships() {
+    while (assembly_offset_ < assembly_order_.size() && batch_.size() < batch_size_) {
+      const auto assembly = assembly_order_[assembly_offset_];
+      const auto main = main_members_.at(assembly);
+      if (!assembly_initialized_) {
+        if (valid_edge(main, assembly)) {
+          batch_.push_back(SemanticRelationView{
+              .kind = SemanticRelationKind::in_assembly,
+              .source_id = main,
+              .target_id = assembly,
+              .ordinal = 0U,
+              .origin = SemanticRelationOrigin::assembly_membership,
+          });
+        }
+        assembly_initialized_ = true;
+        next_member_ordinal_ = 1U;
+        if (batch_.size() == batch_size_) return;
+      }
+      const auto members = assembly_members_.find(assembly);
+      if (members != assembly_members_.end()) {
+        while (member_offset_ < members->second.size() && batch_.size() < batch_size_) {
+          const auto member = members->second[member_offset_++];
+          if (member == main || member == assembly || !valid_edge(member, assembly)) continue;
+          batch_.push_back(SemanticRelationView{
+              .kind = SemanticRelationKind::in_assembly,
+              .source_id = member,
+              .target_id = assembly,
+              .ordinal = next_member_ordinal_++,
+              .origin = SemanticRelationOrigin::assembly_membership,
+          });
+        }
+        if (member_offset_ < members->second.size()) return;
+      }
+      ++assembly_offset_;
+      member_offset_ = 0U;
+      next_member_ordinal_ = 1U;
+      assembly_initialized_ = false;
+    }
+    if (assembly_offset_ == assembly_order_.size()) phase_ = Phase::done;
+  }
+
+  std::shared_ptr<const ModelStorage> storage_;
+  std::vector<SemanticObject> objects_;
+  std::unordered_set<std::uint32_t> endpoints_;
+  const TableLayout* relation_layout_ = nullptr;
+  const TableSchema* relation_schema_ = nullptr;
+  std::array<std::uint32_t, 4> relation_offsets_{};
+  std::vector<std::uint32_t> assembly_order_;
+  std::unordered_map<std::uint32_t, std::uint32_t> main_members_;
+  AssemblyMembers assembly_members_;
+  std::unordered_set<SemanticEdgeKey, SemanticEdgeKeyHash> subelements_;
+  std::unordered_map<std::uint32_t, std::uint32_t> child_ordinals_;
+  std::size_t batch_size_ = 0;
+  Phase phase_ = Phase::parents;
+  std::size_t object_offset_ = 0U;
+  std::uint64_t relation_row_ = 0U;
+  std::size_t assembly_offset_ = 0U;
+  std::size_t member_offset_ = 0U;
+  std::uint32_t next_member_ordinal_ = 1U;
+  bool assembly_initialized_ = false;
+  std::vector<SemanticRelationView> batch_;
+};
+
 class InstanceReader final : public BatchReader {
  public:
   InstanceReader(std::shared_ptr<const ModelStorage> storage, std::vector<InstanceView> instances,
@@ -1537,6 +1726,99 @@ Result<ProcessStream> make_relation_stream(std::shared_ptr<const ModelStorage> s
   const auto* table_layout = &storage->layout.tables[table_schema->ordinal];
   return Result<ProcessStream>::success(std::make_unique<RelationReader>(
       std::move(storage), *table_layout, *table_schema, offsets, batch_size_for(request, 64)));
+}
+
+Result<ProcessStream> make_semantic_relation_stream(std::shared_ptr<const ModelStorage> storage,
+                                                    const Schema& schema,
+                                                    const ProcessRequest& request) {
+  const TableSchema* object_schema = schema.find_table("object");
+  if (object_schema == nullptr || object_schema->ordinal >= storage->layout.tables.size()) {
+    object_schema = schema.find_table("old_object_948");
+  }
+  if (object_schema == nullptr || object_schema->ordinal >= storage->layout.tables.size()) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The object table is unavailable for semantic relations."});
+  }
+  auto object_id = required_field(schema, *object_schema, "id", FieldType::u32);
+  auto parent_id = required_field(schema, *object_schema, "kuuluu", FieldType::u32);
+  auto assembly_id = required_field(schema, *object_schema, "assembly", FieldType::u32);
+  if (!object_id || !parent_id || !assembly_id) {
+    return Result<ProcessStream>::failure(!object_id   ? object_id.error()
+                                          : !parent_id ? parent_id.error()
+                                                       : assembly_id.error());
+  }
+
+  std::vector<SemanticObject> objects;
+  std::unordered_set<std::uint32_t> endpoints;
+  AssemblyMembers assembly_members;
+  const auto payload = storage->payload.bytes();
+  const auto& object_layout = storage->layout.tables[object_schema->ordinal];
+  objects.reserve(static_cast<std::size_t>(object_layout.info.row_count));
+  endpoints.reserve(static_cast<std::size_t>(object_layout.info.row_count));
+  assembly_members.reserve(static_cast<std::size_t>(object_layout.info.row_count / 4U));
+  for (std::uint64_t row = 0; row < object_layout.info.row_count; ++row) {
+    const auto record = object_layout.record(payload, row);
+    if (record.empty()) {
+      return Result<ProcessStream>::failure(
+          {ErrorCode::invalid_container, "An object record lies outside the payload."});
+    }
+    if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0) continue;
+    const auto tuple = record.subspan(1, object_schema->tuple_size);
+    const auto id = read_u32(tuple, object_id.value()->offset);
+    if (id == 0U || !endpoints.insert(id).second) continue;
+    const SemanticObject object{.id = id,
+                                .parent_id = read_u32(tuple, parent_id.value()->offset)};
+    objects.push_back(object);
+    const auto assembly = read_u32(tuple, assembly_id.value()->offset);
+    if (assembly != 0U && assembly != id) assembly_members[assembly].push_back(id);
+  }
+
+  const TableLayout* relation_layout = nullptr;
+  const auto* relation_schema = schema.find_table("relation");
+  std::array<std::uint32_t, 4> relation_offsets{};
+  if (relation_schema != nullptr && relation_schema->ordinal < storage->layout.tables.size()) {
+    constexpr std::array<std::string_view, 4> names{"id", "type", "id1", "id2"};
+    for (std::size_t index = 0; index < names.size(); ++index) {
+      auto field = required_field(schema, *relation_schema, names[index], FieldType::u32);
+      if (!field) return Result<ProcessStream>::failure(field.error());
+      relation_offsets[index] = field.value()->offset;
+    }
+    relation_layout = &storage->layout.tables[relation_schema->ordinal];
+  }
+
+  std::unordered_map<std::uint32_t, std::uint32_t> main_members;
+  std::vector<std::uint32_t> assembly_order;
+  const auto* assembly_schema = schema.find_table("assembly");
+  if (assembly_schema != nullptr && assembly_schema->ordinal < storage->layout.tables.size()) {
+    auto id = required_field(schema, *assembly_schema, "id", FieldType::u32);
+    auto main = required_field(schema, *assembly_schema, "dum", FieldType::u32);
+    if (!id || !main) {
+      return Result<ProcessStream>::failure(!id ? id.error() : main.error());
+    }
+    const auto& layout = storage->layout.tables[assembly_schema->ordinal];
+    main_members.reserve(static_cast<std::size_t>(layout.info.row_count));
+    assembly_order.reserve(static_cast<std::size_t>(layout.info.row_count));
+    for (std::uint64_t row = 0; row < layout.info.row_count; ++row) {
+      const auto record = layout.record(payload, row);
+      if (record.empty()) {
+        return Result<ProcessStream>::failure(
+            {ErrorCode::invalid_container, "An assembly record lies outside the payload."});
+      }
+      if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0) continue;
+      const auto tuple = record.subspan(1, assembly_schema->tuple_size);
+      const auto assembly = read_u32(tuple, id.value()->offset);
+      if (assembly == 0U || !endpoints.contains(assembly) || main_members.contains(assembly)) {
+        continue;
+      }
+      main_members.emplace(assembly, read_u32(tuple, main.value()->offset));
+      assembly_order.push_back(assembly);
+    }
+  }
+
+  return Result<ProcessStream>::success(std::make_unique<SemanticRelationReader>(
+      std::move(storage), std::move(objects), std::move(endpoints), relation_layout,
+      relation_schema, relation_offsets, std::move(assembly_order), std::move(main_members),
+      std::move(assembly_members), batch_size_for(request, 48)));
 }
 
 Result<ProcessStream> make_instance_stream(std::shared_ptr<const ModelStorage> storage,

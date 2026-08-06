@@ -16,6 +16,9 @@ Initial release candidate of the read-only, output-neutral C++20 SDK.
   definition geometry, display meshes, curves, and diagnostics.
 - Output-neutral object-family and weld-location classifications while retaining
   raw type/subtype values as compatibility metadata.
+- Output-neutral assembly identities and deterministic semantic relationship
+  batches for parent-child and member-to-assembly topology, while retaining raw
+  persisted relation rows as a separate stage.
 - Deterministic canonicalization of colliding typed user-defined attributes to
   one value per object and property path.
 - Persisted joint/macro occurrence batches with parent-child ownership and an

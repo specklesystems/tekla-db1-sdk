@@ -19,6 +19,7 @@ enum class Stage : std::uint32_t {
   report_geometry = 1U << 5U,
   instances = 1U << 6U,
   component_definitions = 1U << 7U,
+  semantic_relations = 1U << 8U,
 };
 
 enum class TopologyMode {
@@ -177,6 +178,7 @@ enum class ObjectKind {
   single_rebar,
   rebar_group,
   rebar_mesh,
+  assembly,
 };
 
 enum class WeldLocation {
@@ -228,6 +230,29 @@ struct RelationView {
   std::uint32_t row_id = 0;
   std::uint32_t event_id = 0;
   bool visible = true;
+};
+
+enum class SemanticRelationKind {
+  subelement,
+  in_assembly,
+};
+
+enum class SemanticRelationOrigin {
+  object_parent,
+  stored_relation,
+  assembly_membership,
+};
+
+// Output-neutral graph semantics reconstructed from persisted DB1 state.
+// SUBELEMENT is parent -> child. IN_ASSEMBLY is member -> assembly, with
+// ordinal zero reserved for the assembly's persisted main member.
+struct SemanticRelationView {
+  SemanticRelationKind kind = SemanticRelationKind::subelement;
+  std::uint64_t source_id = 0;
+  std::uint64_t target_id = 0;
+  std::uint32_t ordinal = 0;
+  SemanticRelationOrigin origin = SemanticRelationOrigin::object_parent;
+  std::uint64_t source_relation_id = 0;
 };
 
 enum class InstanceKind {
@@ -283,6 +308,7 @@ enum class BatchKind {
   objects,
   properties,
   relations,
+  semantic_relations,
   materials,
   definition_geometry,
   meshes,
@@ -297,6 +323,7 @@ struct BatchView {
   std::span<const ObjectView> objects;
   std::span<const PropertyView> properties;
   std::span<const RelationView> relations;
+  std::span<const SemanticRelationView> semantic_relations;
   std::span<const InstanceView> instances;
   std::span<const MaterialView> materials;
   std::span<const DefinitionGeometryView> definitions;

@@ -62,7 +62,7 @@ while (auto batch = stream->next()) {
 ~~~
 
 The currently implemented processing requests are `Stage::identities`,
-`Stage::properties`, `Stage::relations`, `Stage::instances`,
+`Stage::properties`, `Stage::relations`, `Stage::semantic_relations`, `Stage::instances`,
 `Stage::definition_geometry`, and `Stage::display_geometry`, in any combination.
 `Stage::component_definitions` additionally indexes a model-local `xslib.db1`
 and annotates persisted component occurrences with `available` or `unavailable`;
@@ -71,6 +71,13 @@ definition batches already carry the output-neutral measurements needed for
 the implemented adapter report subset. `Stage::report_geometry` remains an
 unfinished independent report-only path and fails explicitly with
 `ErrorCode::decoder_unavailable`.
+
+`Stage::relations` retains raw persisted rows for diagnostics and specialized
+adapters. `Stage::semantic_relations` emits normalized output-neutral graph
+edges: `subelement` is parent-to-child, while `in_assembly` is
+member-to-assembly with ordinal zero reserved for the persisted main member.
+Every semantic edge has two live object endpoints; self-edges and dangling
+references are omitted.
 
 ModelPackage owns or shares immutable source buffers. A processed model emits
 bounded, columnar views. Output adapters depend on those views and never on

@@ -48,8 +48,9 @@ bounded arenas without imposing an object graph on callers.
 - Container: raw and concatenated-gzip decoding, header validation, and a
   physical-section directory with bounded decompression.
 - Schema: generated, format-specific record views over immutable bytes.
-- Semantics: identities, typed values, relationships, persisted component
-  occurrences, and support status.
+- Semantics: identities, typed values, raw persisted relationships, normalized
+  parent/assembly graph edges, persisted component occurrences, and support
+  status.
 - Geometry definitions: positioning, persisted contours and paths, literal and
   model-local profiles, imported shapes, cuts, fittings, and operation graphs.
 - Evaluation: analytic geometry first, OCCT for topology-heavy operations.

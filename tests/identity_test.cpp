@@ -8,6 +8,7 @@
 #include <span>
 #include <tekla/db1/model.hpp>
 #include <tuple>
+#include <unordered_set>
 #include <vector>
 
 #include "schema.hpp"
@@ -87,7 +88,8 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
                   bool keyed_footer = false, bool weld_fixture = false,
                   bool zero_transverse_axis = false, bool duplicate_property_fixture = false,
                   bool report_fixture = false, bool zero_position_report_fixture = false,
-                  bool bolt_fixture = false, bool legacy_bolt_fixture = false) {
+                  bool bolt_fixture = false, bool legacy_bolt_fixture = false,
+                  bool assembly_fixture = false) {
   constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
                                                std::byte{0xdb}};
   constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
@@ -108,8 +110,14 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
     for (const auto byte : guid) {
       bytes.push_back(static_cast<std::byte>(byte));
     }
-    append_u32(bytes, weld_fixture ? 13U : bolt_fixture || legacy_bolt_fixture ? 10U : 1U);
-    append_u32(bytes, weld_fixture ? 0U : bolt_fixture || legacy_bolt_fixture ? 1U : 22U);
+    append_u32(bytes, weld_fixture                          ? 13U
+                      : bolt_fixture || legacy_bolt_fixture ? 10U
+                      : assembly_fixture                    ? 2U
+                                                            : 1U);
+    append_u32(bytes, weld_fixture                          ? 0U
+                      : bolt_fixture || legacy_bolt_fixture ? 1U
+                      : assembly_fixture                    ? 0U
+                                                            : 22U);
     for (int index = 0; index < 4; ++index) {
       append_u32(bytes, 0);
     }
@@ -148,6 +156,33 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
       append_object(2002U, 2000U, 10U, 0x40U);
       append_object(2100U, 0U, 4U, 0x50U);
       append_object(2101U, 2100U, 2U, 0x60U);
+    }
+    if (assembly_fixture) {
+      const auto append_object = [&](std::uint32_t id, std::uint32_t parent, std::uint32_t assembly,
+                                     std::uint32_t type, std::uint8_t guid_seed) {
+        bytes.push_back(std::byte{0});
+        const auto tuple_offset = bytes.size();
+        bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+        auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "kuuluu") write_u32(tuple, field.offset, parent);
+          if (field.name == "assembly") write_u32(tuple, field.offset, assembly);
+          if (field.name == "type") write_u32(tuple, field.offset, type);
+          if (field.name == "subtype") write_u32(tuple, field.offset, 0U);
+          if (field.name == "guid") {
+            for (std::size_t index = 0; index < field.size; ++index) {
+              tuple[field.offset + index] =
+                  static_cast<std::byte>(guid_seed + static_cast<std::uint8_t>(index));
+            }
+          }
+        }
+        append_u32(bytes, id + 100U);
+        append_u32(bytes, id + 200U);
+      };
+      append_object(1202U, 1201U, 700U, 2U, 0x70U);
+      append_object(1203U, 0U, 700U, 2U, 0x80U);
+      append_object(700U, 0U, 700U, 15U, 0x90U);
     }
   } else if (table.name == "numattr_attr") {
     bytes.push_back(std::byte{0});
@@ -205,16 +240,29 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
       append_attribute_link(604, 504);
     }
   } else if (table.name == "relation") {
-    bytes.push_back(std::byte{0});
-    append_u32(bytes, 800);
-    append_u32(bytes, edge_chamfer ? 79U : boolean_operative ? 11U : 9U);
-    append_u32(bytes, boolean_operative ? 700U : 1201U);
-    append_u32(bytes, edge_chamfer ? 990U : boolean_operative ? 1201U : 700U);
-    append_fixed(bytes, "", 39);
-    bytes.push_back(std::byte{0});
-    append_u32(bytes, 2);
-    append_u32(bytes, 79);
-    append_u32(bytes, 80);
+    const auto append_relation = [&](std::uint32_t id, std::uint32_t type,
+                                     std::uint32_t source, std::uint32_t target) {
+      bytes.push_back(std::byte{0});
+      append_u32(bytes, id);
+      append_u32(bytes, type);
+      append_u32(bytes, source);
+      append_u32(bytes, target);
+      append_fixed(bytes, "", 39);
+      bytes.push_back(std::byte{0});
+      append_u32(bytes, 2);
+      append_u32(bytes, id + 100U);
+      append_u32(bytes, id + 200U);
+    };
+    if (assembly_fixture) {
+      append_relation(800U, 7U, 1201U, 1203U);
+      append_relation(801U, 11U, 1201U, 700U);
+      append_relation(802U, 12U, 1203U, 1202U);
+      append_relation(803U, 11U, 1201U, 1202U);
+    } else {
+      append_relation(800U, edge_chamfer ? 79U : boolean_operative ? 11U : 9U,
+                      boolean_operative ? 700U : 1201U,
+                      edge_chamfer ? 990U : boolean_operative ? 1201U : 700U);
+    }
   } else if ((component_fixture || report_fixture) && table.name == "string") {
     const auto append_string = [&](std::uint32_t id, std::uint32_t next, std::string_view value) {
       bytes.push_back(std::byte{0});
@@ -409,7 +457,7 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
     }
     append_u32(bytes, 85);
     append_u32(bytes, 86);
-  } else if (report_fixture && table.name == "assembly") {
+  } else if ((report_fixture || assembly_fixture) && table.name == "assembly") {
     bytes.push_back(std::byte{0});
     const auto tuple_offset = bytes.size();
     bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
@@ -664,27 +712,73 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
     }
     append_u32(bytes, 97);
     append_u32(bytes, 98);
-  } else if (table.name == "old_object_attr_900") {
-    bytes.push_back(std::byte{0});
-    append_u32(bytes, 77);
-    append_u32(bytes, legacy_bolt_fixture ? 10U : 2U);
-    append_u32(bytes, legacy_bolt_fixture ? 1U : 23U);
-    append_u32(bytes, 0);
-    append_u32(bytes, 5);
-    append_u32(bytes, 6);
-    append_u32(bytes, 7);
-    append_u32(bytes, 81);
-    append_u32(bytes, 82);
+  } else if (table.name == "old_object_attr_900" ||
+             (assembly_fixture &&
+              (table.name == "old_object_attr_951" || table.name == "old_object_attr_915" ||
+               table.name == "old_object_attr_879"))) {
+    if (assembly_fixture) {
+      const auto append_attribute = [&](std::uint32_t id, std::uint32_t type) {
+        bytes.push_back(std::byte{0});
+        const auto tuple_offset = bytes.size();
+        bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+        auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "type") write_u32(tuple, field.offset, type);
+          if (field.name == "subtype") write_u32(tuple, field.offset, 0U);
+          if (field.name == "obj_flag") write_u32(tuple, field.offset, 5U);
+        }
+        append_u32(bytes, id + 100U);
+        append_u32(bytes, id + 200U);
+      };
+      append_attribute(77U, 2U);
+      append_attribute(78U, 15U);
+    } else {
+      bytes.push_back(std::byte{0});
+      append_u32(bytes, 77);
+      append_u32(bytes, legacy_bolt_fixture ? 10U : 2U);
+      append_u32(bytes, legacy_bolt_fixture ? 1U : 23U);
+      append_u32(bytes, 0);
+      append_u32(bytes, 5);
+      append_u32(bytes, 6);
+      append_u32(bytes, 7);
+      append_u32(bytes, 81);
+      append_u32(bytes, 82);
+    }
   } else if (table.name == "old_object_948") {
-    bytes.push_back(std::byte{0});
-    append_u32(bytes, legacy_bolt_fixture ? 1201U : 1202U);
-    append_u32(bytes, 77);
-    append_u32(bytes, 0);
-    append_u32(bytes, 701);
-    append_ascii(bytes, "{87654321-4321-4cba-9fed-cba987654321}");
-    bytes.push_back(std::byte{0});
-    append_u32(bytes, 93);
-    append_u32(bytes, 94);
+    if (assembly_fixture) {
+      const auto append_object = [&](std::uint32_t id, std::uint32_t attribute,
+                                     std::uint32_t parent, std::uint32_t assembly,
+                                     std::string_view guid) {
+        bytes.push_back(std::byte{0});
+        const auto tuple_offset = bytes.size();
+        bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+        auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "object_attr_id") write_u32(tuple, field.offset, attribute);
+          if (field.name == "kuuluu") write_u32(tuple, field.offset, parent);
+          if (field.name == "assembly") write_u32(tuple, field.offset, assembly);
+          if (field.name == "guid") write_fixed(tuple, field.offset, field.size, guid);
+        }
+        append_u32(bytes, id + 100U);
+        append_u32(bytes, id + 200U);
+      };
+      append_object(1201U, 77U, 0U, 700U, "{00000001-0000-4000-8000-000000000001}");
+      append_object(1202U, 77U, 1201U, 700U, "{00000002-0000-4000-8000-000000000002}");
+      append_object(1203U, 77U, 0U, 700U, "{00000003-0000-4000-8000-000000000003}");
+      append_object(700U, 78U, 0U, 700U, "{00000004-0000-4000-8000-000000000004}");
+    } else {
+      bytes.push_back(std::byte{0});
+      append_u32(bytes, legacy_bolt_fixture ? 1201U : 1202U);
+      append_u32(bytes, 77);
+      append_u32(bytes, 0);
+      append_u32(bytes, 701);
+      append_ascii(bytes, "{87654321-4321-4cba-9fed-cba987654321}");
+      bytes.push_back(std::byte{0});
+      append_u32(bytes, 93);
+      append_u32(bytes, 94);
+    }
   }
 
   bytes.push_back(std::byte{0});
@@ -706,7 +800,7 @@ std::vector<std::byte> database_with_one_object(
     bool weld_fixture = false, bool zero_transverse_axis = false,
     bool duplicate_property_fixture = false, bool report_fixture = false,
     bool zero_position_report_fixture = false, bool bolt_fixture = false,
-    bool legacy_bolt_fixture = false) {
+    bool legacy_bolt_fixture = false, bool assembly_fixture = false) {
   constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
                                                std::byte{0xdb}};
   const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
@@ -726,10 +820,17 @@ std::vector<std::byte> database_with_one_object(
                    profile, object_class, boolean_operative, form_type, contour, polybeam, lofted,
                    edge_chamfer, arc_contour, component_fixture, keyed_tables, weld_fixture,
                    zero_transverse_axis, duplicate_property_fixture, report_fixture,
-                   zero_position_report_fixture, bolt_fixture, legacy_bolt_fixture);
+                   zero_position_report_fixture, bolt_fixture, legacy_bolt_fixture,
+                   assembly_fixture);
     }
   }
   return bytes;
+}
+
+std::vector<std::byte> database_with_relationship_semantics(std::string_view format) {
+  return database_with_one_object("200*10", "14", format, false, 7U, false, false, false, false,
+                                  false, false, false, false, false, false, false, false, false,
+                                  false, true);
 }
 
 std::vector<std::byte> database_with_report_semantics(std::string_view format) {
@@ -1393,6 +1494,84 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
           "attributes and native part properties preserve their value types");
     CHECK(materials == 1, "one part material assignment is emitted");
     CHECK(relations == 1, "one relation is emitted");
+  }
+
+  for (const auto format : {std::string_view{"8.74"}, std::string_view{"8.95"},
+                            std::string_view{"9.08"}, std::string_view{"9.21"},
+                            std::string_view{"9.52"}, std::string_view{"9.66"}}) {
+    const auto relationship_bytes = database_with_relationship_semantics(format);
+    ModelPackage relationship_package;
+    relationship_package.add(
+        Asset::copy(AssetRole::model_database, "relationships.db1", relationship_bytes));
+    auto relationship_model = open(std::move(relationship_package));
+    CHECK(relationship_model.has_value(), "the semantic relationship fixture opens");
+    if (!relationship_model) continue;
+
+    ProcessRequest request;
+    request.stages = Stage::identities | Stage::semantic_relations;
+    auto processed = relationship_model.value().process(request);
+    CHECK(processed.has_value(), "semantic relationships are independently requestable");
+    std::unordered_set<std::uint64_t> object_ids;
+    std::vector<SemanticRelationView> semantic_relations;
+    bool saw_assembly = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "semantic relationship batches decode without an error");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        if (batch.value().kind == BatchKind::objects) {
+          for (const auto& object : batch.value().objects) {
+            object_ids.insert(object.internal_id);
+            saw_assembly |= object.internal_id == 700U && object.kind == ObjectKind::assembly;
+          }
+        } else if (batch.value().kind == BatchKind::semantic_relations) {
+          semantic_relations.insert(semantic_relations.end(),
+                                    batch.value().semantic_relations.begin(),
+                                    batch.value().semantic_relations.end());
+        }
+      }
+    }
+    CHECK(saw_assembly, "a persisted assembly has a stable semantic object kind");
+    CHECK(semantic_relations.size() == 7U,
+          "parent, stored, and assembly semantics produce seven deduplicated edges");
+    for (const auto& relation : semantic_relations) {
+      CHECK(relation.source_id != relation.target_id && object_ids.contains(relation.source_id) &&
+                object_ids.contains(relation.target_id),
+            "semantic relationships never expose self-edges or dangling endpoints");
+    }
+    const auto contains_relation = [&](SemanticRelationKind kind, std::uint64_t source,
+                                       std::uint64_t target, std::uint32_t ordinal,
+                                       SemanticRelationOrigin origin) {
+      return std::ranges::any_of(semantic_relations, [&](const auto& relation) {
+        return relation.kind == kind && relation.source_id == source &&
+               relation.target_id == target && relation.ordinal == ordinal &&
+               relation.origin == origin;
+      });
+    };
+    CHECK(contains_relation(SemanticRelationKind::subelement, 1201U, 1202U, 0U,
+                            SemanticRelationOrigin::object_parent),
+          "SUBELEMENT is directed from a persisted parent to its child");
+    CHECK(contains_relation(SemanticRelationKind::subelement, 1201U, 1203U, 1U,
+                            SemanticRelationOrigin::stored_relation),
+          "stored relation type 7 supplements SUBELEMENT deterministically");
+    CHECK(contains_relation(SemanticRelationKind::subelement, 1201U, 700U, 2U,
+                            SemanticRelationOrigin::stored_relation),
+          "stored relation type 11 supplements SUBELEMENT deterministically");
+    CHECK(contains_relation(SemanticRelationKind::subelement, 1203U, 1202U, 0U,
+                            SemanticRelationOrigin::stored_relation),
+          "stored relation type 12 supplements SUBELEMENT deterministically");
+    CHECK(std::ranges::count_if(semantic_relations, [](const auto& relation) {
+            return relation.kind == SemanticRelationKind::subelement &&
+                   relation.source_id == 1201U && relation.target_id == 1202U;
+          }) == 1,
+          "a stored route overlapping an object parent does not duplicate SUBELEMENT");
+    CHECK(contains_relation(SemanticRelationKind::in_assembly, 1201U, 700U, 0U,
+                            SemanticRelationOrigin::assembly_membership) &&
+              contains_relation(SemanticRelationKind::in_assembly, 1202U, 700U, 1U,
+                                SemanticRelationOrigin::assembly_membership) &&
+              contains_relation(SemanticRelationKind::in_assembly, 1203U, 700U, 2U,
+                                SemanticRelationOrigin::assembly_membership),
+          "IN_ASSEMBLY is member-to-assembly with the main member at ordinal zero");
   }
 
   for (const auto format : {std::string_view{"9.52"}, std::string_view{"9.66"}}) {
