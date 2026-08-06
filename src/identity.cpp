@@ -130,7 +130,9 @@ void format_guid(std::span<const std::byte, 16> bytes, std::array<char, 36>& out
   return true;
 }
 
-[[nodiscard]] ObjectKind object_kind(std::uint32_t type, std::uint32_t subtype) noexcept {
+}  // namespace
+
+ObjectKind object_kind(std::uint32_t type, std::uint32_t subtype) noexcept {
   if (type == 2U) {
     switch (subtype) {
       case 0U:
@@ -163,6 +165,8 @@ void format_guid(std::span<const std::byte, 16> bytes, std::array<char, 36>& out
   }
   return ObjectKind::unknown;
 }
+
+namespace {
 
 class IdentityReader final : public BatchReader {
  public:

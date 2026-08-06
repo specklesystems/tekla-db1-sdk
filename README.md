@@ -75,7 +75,9 @@ unfinished independent report-only path and fails explicitly with
 `Stage::relations` retains raw persisted rows for diagnostics and specialized
 adapters. `Stage::semantic_relations` emits normalized output-neutral graph
 edges: `subelement` is parent-to-child, while `in_assembly` is
-member-to-assembly with ordinal zero reserved for the persisted main member.
+member-to-assembly with ordinal zero reserved for the persisted main member,
+`connects_to` follows persisted component primary-to-secondary roles, and
+`hosted_on` is reinforcement-to-structural-host.
 Every semantic edge has two live object endpoints; self-edges and dangling
 references are omitted.
 

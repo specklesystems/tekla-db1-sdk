@@ -235,17 +235,22 @@ struct RelationView {
 enum class SemanticRelationKind {
   subelement,
   in_assembly,
+  connects_to,
+  hosted_on,
 };
 
 enum class SemanticRelationOrigin {
   object_parent,
   stored_relation,
   assembly_membership,
+  component_connection,
+  rebar_host,
 };
 
 // Output-neutral graph semantics reconstructed from persisted DB1 state.
 // SUBELEMENT is parent -> child. IN_ASSEMBLY is member -> assembly, with
-// ordinal zero reserved for the assembly's persisted main member.
+// ordinal zero reserved for the assembly's persisted main member. CONNECTS_TO
+// is component primary -> secondary. HOSTED_ON is reinforcement -> host.
 struct SemanticRelationView {
   SemanticRelationKind kind = SemanticRelationKind::subelement;
   std::uint64_t source_id = 0;

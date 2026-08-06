@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "record.hpp"
+#include "identity.hpp"
 #include "role_schema.hpp"
 
 namespace tekla::db1::detail {
@@ -393,6 +394,7 @@ class RelationReader final : public BatchReader {
 struct SemanticObject {
   std::uint32_t id = 0;
   std::uint32_t parent_id = 0;
+  ObjectKind kind = ObjectKind::unknown;
 };
 
 struct SemanticEdgeKey {
@@ -420,6 +422,8 @@ class SemanticRelationReader final : public BatchReader {
                          const TableLayout* relation_layout,
                          const TableSchema* relation_schema,
                          std::array<std::uint32_t, 4> relation_offsets,
+                         const TableLayout* joint_layout, const TableSchema* joint_schema,
+                         std::array<std::uint32_t, 3> joint_offsets,
                          std::vector<std::uint32_t> assembly_order,
                          std::unordered_map<std::uint32_t, std::uint32_t> main_members,
                          AssemblyMembers assembly_members, std::size_t batch_size)
@@ -429,12 +433,17 @@ class SemanticRelationReader final : public BatchReader {
         relation_layout_(relation_layout),
         relation_schema_(relation_schema),
         relation_offsets_(relation_offsets),
+        joint_layout_(joint_layout),
+        joint_schema_(joint_schema),
+        joint_offsets_(joint_offsets),
         assembly_order_(std::move(assembly_order)),
         main_members_(std::move(main_members)),
         assembly_members_(std::move(assembly_members)),
         batch_size_(batch_size) {
     batch_.reserve(batch_size_);
     subelements_.reserve(objects_.size());
+    kinds_.reserve(objects_.size());
+    for (const auto& object : objects_) kinds_.emplace(object.id, object.kind);
   }
 
   Result<BatchView> next() override {
@@ -445,8 +454,11 @@ class SemanticRelationReader final : public BatchReader {
       } else if (phase_ == Phase::stored_relations) {
         auto emitted = emit_stored_relations();
         if (!emitted) return Result<BatchView>::failure(emitted.error());
-      } else {
+      } else if (phase_ == Phase::assemblies) {
         emit_assembly_memberships();
+      } else {
+        auto emitted = emit_component_connections();
+        if (!emitted) return Result<BatchView>::failure(emitted.error());
       }
     }
     if (batch_.empty() && phase_ == Phase::done) {
@@ -461,6 +473,7 @@ class SemanticRelationReader final : public BatchReader {
     parents,
     stored_relations,
     assemblies,
+    component_connections,
     done,
   };
 
@@ -479,6 +492,57 @@ class SemanticRelationReader final : public BatchReader {
         .ordinal = child_ordinals_[parent]++,
         .origin = origin,
         .source_relation_id = source_relation_id,
+    });
+    return true;
+  }
+
+  [[nodiscard]] static bool is_reinforcement(ObjectKind kind) noexcept {
+    return kind == ObjectKind::single_rebar || kind == ObjectKind::rebar_group ||
+           kind == ObjectKind::rebar_mesh;
+  }
+
+  [[nodiscard]] static bool is_host(ObjectKind kind) noexcept {
+    return kind == ObjectKind::beam || kind == ObjectKind::contour_plate ||
+           kind == ObjectKind::poly_beam || kind == ObjectKind::brep ||
+           kind == ObjectKind::lofted_plate || kind == ObjectKind::connection ||
+           kind == ObjectKind::component;
+  }
+
+  bool append_hosted_on(std::uint32_t reinforcement, std::uint32_t host,
+                        std::uint32_t source_relation_id) {
+    if (!valid_edge(reinforcement, host) || !hosted_.insert({reinforcement, host}).second) {
+      return false;
+    }
+    const auto reinforcement_kind = kinds_.find(reinforcement);
+    const auto host_kind = kinds_.find(host);
+    if (reinforcement_kind == kinds_.end() || host_kind == kinds_.end() ||
+        !is_reinforcement(reinforcement_kind->second) || !is_host(host_kind->second)) {
+      hosted_.erase({reinforcement, host});
+      return false;
+    }
+    batch_.push_back(SemanticRelationView{
+        .kind = SemanticRelationKind::hosted_on,
+        .source_id = reinforcement,
+        .target_id = host,
+        .ordinal = 0U,
+        .origin = SemanticRelationOrigin::rebar_host,
+        .source_relation_id = source_relation_id,
+    });
+    return true;
+  }
+
+  bool append_connects_to(std::uint32_t primary, std::uint32_t secondary,
+                          std::uint32_t joint_id) {
+    if (!valid_edge(primary, secondary) || !connections_.insert({primary, secondary}).second) {
+      return false;
+    }
+    batch_.push_back(SemanticRelationView{
+        .kind = SemanticRelationKind::connects_to,
+        .source_id = primary,
+        .target_id = secondary,
+        .ordinal = 0U,
+        .origin = SemanticRelationOrigin::component_connection,
+        .source_relation_id = joint_id,
     });
     return true;
   }
@@ -506,11 +570,14 @@ class SemanticRelationReader final : public BatchReader {
       if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0) continue;
       const auto tuple = record.subspan(1, relation_schema_->tuple_size);
       const auto relation_type = read_u32(tuple, relation_offsets_[1]);
-      if (relation_type != 7U && relation_type != 11U && relation_type != 12U) continue;
-      append_subelement(read_u32(tuple, relation_offsets_[2]),
-                        read_u32(tuple, relation_offsets_[3]),
-                        SemanticRelationOrigin::stored_relation,
-                        read_u32(tuple, relation_offsets_[0]));
+      const auto source = read_u32(tuple, relation_offsets_[2]);
+      const auto target = read_u32(tuple, relation_offsets_[3]);
+      const auto relation_id = read_u32(tuple, relation_offsets_[0]);
+      if (relation_type == 7U || relation_type == 11U || relation_type == 12U) {
+        append_subelement(source, target, SemanticRelationOrigin::stored_relation, relation_id);
+      } else if (relation_type == 47U) {
+        append_hosted_on(target, source, relation_id);
+      }
     }
     if (relation_row_ == relation_layout_->info.row_count) phase_ = Phase::assemblies;
     return Result<bool>::success(true);
@@ -554,7 +621,29 @@ class SemanticRelationReader final : public BatchReader {
       next_member_ordinal_ = 1U;
       assembly_initialized_ = false;
     }
-    if (assembly_offset_ == assembly_order_.size()) phase_ = Phase::done;
+    if (assembly_offset_ == assembly_order_.size()) phase_ = Phase::component_connections;
+  }
+
+  Result<bool> emit_component_connections() {
+    if (joint_layout_ == nullptr || joint_schema_ == nullptr) {
+      phase_ = Phase::done;
+      return Result<bool>::success(false);
+    }
+    const auto payload = storage_->payload.bytes();
+    while (joint_row_ < joint_layout_->info.row_count && batch_.size() < batch_size_) {
+      const auto record = joint_layout_->record(payload, joint_row_++);
+      if (record.empty()) {
+        return Result<bool>::failure(
+            {ErrorCode::invalid_container, "A joint record lies outside the payload."});
+      }
+      if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+      const auto tuple = record.subspan(1U, joint_schema_->tuple_size);
+      append_connects_to(read_u32(tuple, joint_offsets_[1]),
+                         read_u32(tuple, joint_offsets_[2]),
+                         read_u32(tuple, joint_offsets_[0]));
+    }
+    if (joint_row_ == joint_layout_->info.row_count) phase_ = Phase::done;
+    return Result<bool>::success(true);
   }
 
   std::shared_ptr<const ModelStorage> storage_;
@@ -563,15 +652,22 @@ class SemanticRelationReader final : public BatchReader {
   const TableLayout* relation_layout_ = nullptr;
   const TableSchema* relation_schema_ = nullptr;
   std::array<std::uint32_t, 4> relation_offsets_{};
+  const TableLayout* joint_layout_ = nullptr;
+  const TableSchema* joint_schema_ = nullptr;
+  std::array<std::uint32_t, 3> joint_offsets_{};
   std::vector<std::uint32_t> assembly_order_;
   std::unordered_map<std::uint32_t, std::uint32_t> main_members_;
   AssemblyMembers assembly_members_;
   std::unordered_set<SemanticEdgeKey, SemanticEdgeKeyHash> subelements_;
+  std::unordered_set<SemanticEdgeKey, SemanticEdgeKeyHash> hosted_;
+  std::unordered_set<SemanticEdgeKey, SemanticEdgeKeyHash> connections_;
+  std::unordered_map<std::uint32_t, ObjectKind> kinds_;
   std::unordered_map<std::uint32_t, std::uint32_t> child_ordinals_;
   std::size_t batch_size_ = 0;
   Phase phase_ = Phase::parents;
   std::size_t object_offset_ = 0U;
   std::uint64_t relation_row_ = 0U;
+  std::uint64_t joint_row_ = 0U;
   std::size_t assembly_offset_ = 0U;
   std::size_t member_offset_ = 0U;
   std::uint32_t next_member_ordinal_ = 1U;
@@ -1742,10 +1838,57 @@ Result<ProcessStream> make_semantic_relation_stream(std::shared_ptr<const ModelS
   auto object_id = required_field(schema, *object_schema, "id", FieldType::u32);
   auto parent_id = required_field(schema, *object_schema, "kuuluu", FieldType::u32);
   auto assembly_id = required_field(schema, *object_schema, "assembly", FieldType::u32);
-  if (!object_id || !parent_id || !assembly_id) {
+  const auto* direct_type = find_field(schema, *object_schema, "type");
+  const auto* direct_subtype = find_field(schema, *object_schema, "subtype");
+  const auto* attribute_id = find_field(schema, *object_schema, "object_attr_id");
+  if (!object_id || !parent_id || !assembly_id ||
+      ((direct_type == nullptr || direct_subtype == nullptr) && attribute_id == nullptr)) {
     return Result<ProcessStream>::failure(!object_id   ? object_id.error()
                                           : !parent_id ? parent_id.error()
-                                                       : assembly_id.error());
+                                          : !assembly_id ? assembly_id.error()
+                                                         : Error{ErrorCode::schema_mismatch,
+                                                                 "The object kind fields are unavailable for semantic relations."});
+  }
+
+  struct RawKind {
+    std::uint32_t type = 0U;
+    std::uint32_t subtype = 0U;
+  };
+  std::unordered_map<std::uint32_t, RawKind> legacy_kinds;
+  if (attribute_id != nullptr && (direct_type == nullptr || direct_subtype == nullptr)) {
+    constexpr std::array<std::string_view, 4> attribute_tables{
+        "old_object_attr_951", "old_object_attr_915", "old_object_attr_900",
+        "old_object_attr_879"};
+    for (const auto name : attribute_tables) {
+      const auto* candidate = schema.find_table(name);
+      if (candidate == nullptr || candidate->ordinal >= storage->layout.tables.size() ||
+          storage->layout.tables[candidate->ordinal].info.row_count == 0U) {
+        continue;
+      }
+      auto id = required_field(schema, *candidate, "id", FieldType::u32);
+      auto type = required_field(schema, *candidate, "type", FieldType::u32);
+      auto subtype = required_field(schema, *candidate, "subtype", FieldType::u32);
+      if (!id || !type || !subtype) {
+        return Result<ProcessStream>::failure(!id ? id.error() : !type ? type.error()
+                                                                       : subtype.error());
+      }
+      const auto& layout = storage->layout.tables[candidate->ordinal];
+      legacy_kinds.reserve(static_cast<std::size_t>(layout.info.row_count));
+      for (std::uint64_t row = 0; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(storage->payload.bytes(), row);
+        if (record.empty()) {
+          return Result<ProcessStream>::failure(
+              {ErrorCode::invalid_container, "An object attribute lies outside the payload."});
+        }
+        if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+        const auto tuple = record.subspan(1U, candidate->tuple_size);
+        legacy_kinds.insert_or_assign(
+            read_u32(tuple, id.value()->offset),
+            RawKind{read_u32(tuple, type.value()->offset),
+                    read_u32(tuple, subtype.value()->offset)});
+      }
+      break;
+    }
   }
 
   std::vector<SemanticObject> objects;
@@ -1766,8 +1909,18 @@ Result<ProcessStream> make_semantic_relation_stream(std::shared_ptr<const ModelS
     const auto tuple = record.subspan(1, object_schema->tuple_size);
     const auto id = read_u32(tuple, object_id.value()->offset);
     if (id == 0U || !endpoints.insert(id).second) continue;
-    const SemanticObject object{.id = id,
-                                .parent_id = read_u32(tuple, parent_id.value()->offset)};
+    RawKind raw_kind;
+    if (direct_type != nullptr && direct_subtype != nullptr) {
+      raw_kind = {read_u32(tuple, direct_type->offset), read_u32(tuple, direct_subtype->offset)};
+    } else {
+      const auto found = legacy_kinds.find(read_u32(tuple, attribute_id->offset));
+      if (found != legacy_kinds.end()) raw_kind = found->second;
+    }
+    const SemanticObject object{
+        .id = id,
+        .parent_id = read_u32(tuple, parent_id.value()->offset),
+        .kind = object_kind(raw_kind.type, raw_kind.subtype),
+    };
     objects.push_back(object);
     const auto assembly = read_u32(tuple, assembly_id.value()->offset);
     if (assembly != 0U && assembly != id) assembly_members[assembly].push_back(id);
@@ -1784,6 +1937,20 @@ Result<ProcessStream> make_semantic_relation_stream(std::shared_ptr<const ModelS
       relation_offsets[index] = field.value()->offset;
     }
     relation_layout = &storage->layout.tables[relation_schema->ordinal];
+  }
+
+  const TableLayout* joint_layout = nullptr;
+  const auto* joint_schema = schema.find_table("joint");
+  std::array<std::uint32_t, 3> joint_offsets{};
+  if (joint_schema != nullptr && joint_schema->ordinal < storage->layout.tables.size() &&
+      storage->layout.tables[joint_schema->ordinal].info.row_count != 0U) {
+    constexpr std::array<std::string_view, 3> names{"id", "prim", "sek"};
+    for (std::size_t index = 0; index < names.size(); ++index) {
+      auto field = required_field(schema, *joint_schema, names[index], FieldType::u32);
+      if (!field) return Result<ProcessStream>::failure(field.error());
+      joint_offsets[index] = field.value()->offset;
+    }
+    joint_layout = &storage->layout.tables[joint_schema->ordinal];
   }
 
   std::unordered_map<std::uint32_t, std::uint32_t> main_members;
@@ -1817,8 +1984,9 @@ Result<ProcessStream> make_semantic_relation_stream(std::shared_ptr<const ModelS
 
   return Result<ProcessStream>::success(std::make_unique<SemanticRelationReader>(
       std::move(storage), std::move(objects), std::move(endpoints), relation_layout,
-      relation_schema, relation_offsets, std::move(assembly_order), std::move(main_members),
-      std::move(assembly_members), batch_size_for(request, 48)));
+      relation_schema, relation_offsets, joint_layout, joint_schema, joint_offsets,
+      std::move(assembly_order), std::move(main_members), std::move(assembly_members),
+      batch_size_for(request, 48)));
 }
 
 Result<ProcessStream> make_instance_stream(std::shared_ptr<const ModelStorage> storage,

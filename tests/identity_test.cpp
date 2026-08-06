@@ -159,7 +159,8 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
     }
     if (assembly_fixture) {
       const auto append_object = [&](std::uint32_t id, std::uint32_t parent, std::uint32_t assembly,
-                                     std::uint32_t type, std::uint8_t guid_seed) {
+                                     std::uint32_t type, std::uint32_t subtype,
+                                     std::uint8_t guid_seed) {
         bytes.push_back(std::byte{0});
         const auto tuple_offset = bytes.size();
         bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
@@ -169,7 +170,7 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
           if (field.name == "kuuluu") write_u32(tuple, field.offset, parent);
           if (field.name == "assembly") write_u32(tuple, field.offset, assembly);
           if (field.name == "type") write_u32(tuple, field.offset, type);
-          if (field.name == "subtype") write_u32(tuple, field.offset, 0U);
+          if (field.name == "subtype") write_u32(tuple, field.offset, subtype);
           if (field.name == "guid") {
             for (std::size_t index = 0; index < field.size; ++index) {
               tuple[field.offset + index] =
@@ -180,9 +181,10 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
         append_u32(bytes, id + 100U);
         append_u32(bytes, id + 200U);
       };
-      append_object(1202U, 1201U, 700U, 2U, 0x70U);
-      append_object(1203U, 0U, 700U, 2U, 0x80U);
-      append_object(700U, 0U, 700U, 15U, 0x90U);
+      append_object(1202U, 1201U, 700U, 2U, 0U, 0x70U);
+      append_object(1203U, 0U, 700U, 2U, 0U, 0x80U);
+      append_object(1204U, 0U, 0U, 47U, 0U, 0xa0U);
+      append_object(700U, 0U, 700U, 15U, 0U, 0x90U);
     }
   } else if (table.name == "numattr_attr") {
     bytes.push_back(std::byte{0});
@@ -258,6 +260,7 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
       append_relation(801U, 11U, 1201U, 700U);
       append_relation(802U, 12U, 1203U, 1202U);
       append_relation(803U, 11U, 1201U, 1202U);
+      append_relation(804U, 47U, 1201U, 1204U);
     } else {
       append_relation(800U, edge_chamfer ? 79U : boolean_operative ? 11U : 9U,
                       boolean_operative ? 700U : 1201U,
@@ -286,20 +289,20 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
       append_string(3002U, 0U, "Joint description");
       append_string(3003U, 0U, "Macro description");
     }
-  } else if (component_fixture && table.name == "joint") {
+  } else if ((component_fixture || assembly_fixture) && table.name == "joint") {
     bytes.push_back(std::byte{0});
     const auto tuple_offset = bytes.size();
     bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
     auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
     for (const auto& field : schema.table_fields(table)) {
-      if (field.name == "id") write_u32(tuple, field.offset, 2000U);
+      if (field.name == "id") write_u32(tuple, field.offset, assembly_fixture ? 900U : 2000U);
       if (field.name == "obj_type") write_u32(tuple, field.offset, 4U);
       if (field.name == "joint_no") write_u32(tuple, field.offset, 123U);
-      if (field.name == "name") write_u32(tuple, field.offset, 3000U);
-      if (field.name == "prim") write_u32(tuple, field.offset, 1201U);
-      if (field.name == "sek") write_u32(tuple, field.offset, 700U);
+      if (field.name == "name") write_u32(tuple, field.offset, component_fixture ? 3000U : 0U);
+      if (field.name == "prim") write_u32(tuple, field.offset, assembly_fixture ? 1202U : 1201U);
+      if (field.name == "sek") write_u32(tuple, field.offset, assembly_fixture ? 1203U : 700U);
       if (field.name == "seknum") write_u32(tuple, field.offset, 1U);
-      if (field.name == "desc") write_u32(tuple, field.offset, 3002U);
+      if (field.name == "desc") write_u32(tuple, field.offset, component_fixture ? 3002U : 0U);
     }
     append_u32(bytes, 2200U);
     append_u32(bytes, 2300U);
@@ -717,7 +720,8 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
               (table.name == "old_object_attr_951" || table.name == "old_object_attr_915" ||
                table.name == "old_object_attr_879"))) {
     if (assembly_fixture) {
-      const auto append_attribute = [&](std::uint32_t id, std::uint32_t type) {
+      const auto append_attribute = [&](std::uint32_t id, std::uint32_t type,
+                                        std::uint32_t subtype = 0U) {
         bytes.push_back(std::byte{0});
         const auto tuple_offset = bytes.size();
         bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
@@ -725,7 +729,7 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
         for (const auto& field : schema.table_fields(table)) {
           if (field.name == "id") write_u32(tuple, field.offset, id);
           if (field.name == "type") write_u32(tuple, field.offset, type);
-          if (field.name == "subtype") write_u32(tuple, field.offset, 0U);
+          if (field.name == "subtype") write_u32(tuple, field.offset, subtype);
           if (field.name == "obj_flag") write_u32(tuple, field.offset, 5U);
         }
         append_u32(bytes, id + 100U);
@@ -733,6 +737,7 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
       };
       append_attribute(77U, 2U);
       append_attribute(78U, 15U);
+      append_attribute(79U, 47U);
     } else {
       bytes.push_back(std::byte{0});
       append_u32(bytes, 77);
@@ -767,6 +772,7 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
       append_object(1201U, 77U, 0U, 700U, "{00000001-0000-4000-8000-000000000001}");
       append_object(1202U, 77U, 1201U, 700U, "{00000002-0000-4000-8000-000000000002}");
       append_object(1203U, 77U, 0U, 700U, "{00000003-0000-4000-8000-000000000003}");
+      append_object(1204U, 79U, 0U, 0U, "{00000005-0000-4000-8000-000000000005}");
       append_object(700U, 78U, 0U, 700U, "{00000004-0000-4000-8000-000000000004}");
     } else {
       bytes.push_back(std::byte{0});
@@ -1532,8 +1538,8 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
       }
     }
     CHECK(saw_assembly, "a persisted assembly has a stable semantic object kind");
-    CHECK(semantic_relations.size() == 7U,
-          "parent, stored, and assembly semantics produce seven deduplicated edges");
+    CHECK(semantic_relations.size() == 9U,
+          "persisted hierarchy, assembly, hosting, and connection semantics produce nine deduplicated edges");
     for (const auto& relation : semantic_relations) {
       CHECK(relation.source_id != relation.target_id && object_ids.contains(relation.source_id) &&
                 object_ids.contains(relation.target_id),
@@ -1572,6 +1578,22 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
               contains_relation(SemanticRelationKind::in_assembly, 1203U, 700U, 2U,
                                 SemanticRelationOrigin::assembly_membership),
           "IN_ASSEMBLY is member-to-assembly with the main member at ordinal zero");
+    CHECK(contains_relation(SemanticRelationKind::hosted_on, 1204U, 1201U, 0U,
+                            SemanticRelationOrigin::rebar_host),
+          "HOSTED_ON reverses the persisted host-to-reinforcement relation");
+    CHECK(contains_relation(SemanticRelationKind::connects_to, 1202U, 1203U, 0U,
+                            SemanticRelationOrigin::component_connection),
+          "CONNECTS_TO follows the persisted joint primary-to-secondary direction");
+    const auto hosted = std::ranges::find_if(semantic_relations, [](const auto& relation) {
+      return relation.kind == SemanticRelationKind::hosted_on;
+    });
+    const auto connection = std::ranges::find_if(semantic_relations, [](const auto& relation) {
+      return relation.kind == SemanticRelationKind::connects_to;
+    });
+    CHECK(hosted != semantic_relations.end() && hosted->source_relation_id == 804U,
+          "HOSTED_ON retains its persisted relation identity");
+    CHECK(connection != semantic_relations.end() && connection->source_relation_id == 900U,
+          "CONNECTS_TO retains its persisted joint identity");
   }
 
   for (const auto format : {std::string_view{"9.52"}, std::string_view{"9.66"}}) {

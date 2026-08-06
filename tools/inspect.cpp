@@ -97,6 +97,8 @@ int main(int argc, char** argv) {
   std::uint64_t relation_count = 0;
   std::uint64_t subelement_count = 0;
   std::uint64_t assembly_membership_count = 0;
+  std::uint64_t connection_count = 0;
+  std::uint64_t hosted_count = 0;
   std::uint64_t assembly_count = 0;
   std::uint64_t instance_count = 0;
   std::uint64_t persisted_component_child_count = 0;
@@ -155,6 +157,10 @@ int main(int argc, char** argv) {
               relation.kind == tekla::db1::SemanticRelationKind::subelement ? 1U : 0U;
           assembly_membership_count +=
               relation.kind == tekla::db1::SemanticRelationKind::in_assembly ? 1U : 0U;
+          connection_count +=
+              relation.kind == tekla::db1::SemanticRelationKind::connects_to ? 1U : 0U;
+          hosted_count +=
+              relation.kind == tekla::db1::SemanticRelationKind::hosted_on ? 1U : 0U;
         }
       } else if (batch.value().kind == tekla::db1::BatchKind::instances) {
         instance_count += batch.value().instances.size();
@@ -230,6 +236,10 @@ int main(int argc, char** argv) {
       std::printf("  \"assembly_count\": %llu,\n", static_cast<unsigned long long>(assembly_count));
       std::printf("  \"assembly_membership_count\": %llu,\n",
                   static_cast<unsigned long long>(assembly_membership_count));
+      std::printf("  \"connection_count\": %llu,\n",
+                  static_cast<unsigned long long>(connection_count));
+      std::printf("  \"hosted_count\": %llu,\n",
+                  static_cast<unsigned long long>(hosted_count));
       std::printf("  \"instance_count\": %llu,\n", static_cast<unsigned long long>(instance_count));
       std::printf("  \"persisted_component_child_count\": %llu,\n",
                   static_cast<unsigned long long>(persisted_component_child_count));
