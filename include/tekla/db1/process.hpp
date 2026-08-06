@@ -181,6 +181,25 @@ enum class ObjectKind {
   assembly,
 };
 
+// A persisted object can either be an independently meaningful model element
+// or an input used to evaluate another element's final geometry. Both remain
+// available through raw identity batches; only model elements are valid
+// endpoints in the output-neutral semantic relationship stream.
+enum class ObjectRole {
+  model_element,
+  evaluation_feature,
+};
+
+[[nodiscard]] constexpr ObjectRole object_role(ObjectKind kind) noexcept {
+  return kind == ObjectKind::boolean_part || kind == ObjectKind::cut_plane
+             ? ObjectRole::evaluation_feature
+             : ObjectRole::model_element;
+}
+
+[[nodiscard]] constexpr bool is_model_element(ObjectKind kind) noexcept {
+  return object_role(kind) == ObjectRole::model_element;
+}
+
 enum class WeldLocation {
   not_applicable,
   unknown,

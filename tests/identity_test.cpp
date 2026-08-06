@@ -184,6 +184,10 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
       append_object(1202U, 1201U, 700U, 2U, 0U, 0x70U);
       append_object(1203U, 0U, 700U, 2U, 0U, 0x80U);
       append_object(1204U, 0U, 0U, 47U, 0U, 0xa0U);
+      if (schema.internal_format == "9.52" || schema.internal_format == "9.66") {
+        append_object(1205U, 1201U, 0U, 11U, 0U, 0xb0U);
+        append_object(1206U, 1201U, 0U, 12U, 0U, 0xc0U);
+      }
       append_object(700U, 0U, 700U, 15U, 0U, 0x90U);
     }
   } else if (table.name == "numattr_attr") {
@@ -261,6 +265,10 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
       append_relation(802U, 12U, 1203U, 1202U);
       append_relation(803U, 11U, 1201U, 1202U);
       append_relation(804U, 47U, 1201U, 1204U);
+      if (schema.internal_format == "9.52" || schema.internal_format == "9.66") {
+        append_relation(805U, 11U, 1201U, 1205U);
+        append_relation(806U, 12U, 1201U, 1206U);
+      }
     } else {
       append_relation(800U, edge_chamfer ? 79U : boolean_operative ? 11U : 9U,
                       boolean_operative ? 700U : 1201U,
@@ -1379,6 +1387,13 @@ std::vector<std::uint64_t> display_signature(const tekla::db1::Model& model) {
 
 int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
   using namespace tekla::db1;
+  CHECK(object_role(ObjectKind::beam) == ObjectRole::model_element,
+        "ordinary parts are independently publishable model elements");
+  CHECK(object_role(ObjectKind::component) == ObjectRole::model_element,
+        "component occurrences are independently publishable model elements");
+  CHECK(object_role(ObjectKind::boolean_part) == ObjectRole::evaluation_feature &&
+            object_role(ObjectKind::cut_plane) == ObjectRole::evaluation_feature,
+        "Boolean parts and cut planes are geometry-evaluation features");
   const auto bytes = database_with_one_object();
   ModelPackage package;
   package.add(Asset::copy(AssetRole::model_database, "identity.db1", bytes));
@@ -1514,12 +1529,16 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     if (!relationship_model) continue;
 
     ProcessRequest request;
-    request.stages = Stage::identities | Stage::semantic_relations;
+    request.stages = Stage::identities | Stage::relations | Stage::semantic_relations;
     auto processed = relationship_model.value().process(request);
     CHECK(processed.has_value(), "semantic relationships are independently requestable");
     std::unordered_set<std::uint64_t> object_ids;
     std::vector<SemanticRelationView> semantic_relations;
     bool saw_assembly = false;
+    bool saw_boolean_part = false;
+    bool saw_cut_plane = false;
+    bool saw_raw_boolean_relation = false;
+    bool saw_raw_cut_relation = false;
     if (processed) {
       while (true) {
         auto batch = processed.value()->next();
@@ -1529,6 +1548,17 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
           for (const auto& object : batch.value().objects) {
             object_ids.insert(object.internal_id);
             saw_assembly |= object.internal_id == 700U && object.kind == ObjectKind::assembly;
+            saw_boolean_part |=
+                object.internal_id == 1205U && object.kind == ObjectKind::boolean_part;
+            saw_cut_plane |= object.internal_id == 1206U && object.kind == ObjectKind::cut_plane;
+          }
+        } else if (batch.value().kind == BatchKind::relations) {
+          for (const auto& relation : batch.value().relations) {
+            saw_raw_boolean_relation |= relation.relation_id == 805U && relation.type == 11U &&
+                                        relation.source_id == 1201U &&
+                                        relation.target_id == 1205U;
+            saw_raw_cut_relation |= relation.relation_id == 806U && relation.type == 12U &&
+                                    relation.source_id == 1201U && relation.target_id == 1206U;
           }
         } else if (batch.value().kind == BatchKind::semantic_relations) {
           semantic_relations.insert(semantic_relations.end(),
@@ -1538,6 +1568,12 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
       }
     }
     CHECK(saw_assembly, "a persisted assembly has a stable semantic object kind");
+    if (format == "9.52" || format == "9.66") {
+      CHECK(saw_boolean_part && saw_cut_plane,
+            "evaluation features remain available through raw object identity batches");
+      CHECK(saw_raw_boolean_relation && saw_raw_cut_relation,
+            "evaluation feature relations remain available through raw relation batches");
+    }
     CHECK(semantic_relations.size() == 9U,
           "persisted hierarchy, assembly, hosting, and connection semantics produce nine deduplicated edges");
     for (const auto& relation : semantic_relations) {
@@ -1571,6 +1607,11 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
                    relation.source_id == 1201U && relation.target_id == 1202U;
           }) == 1,
           "a stored route overlapping an object parent does not duplicate SUBELEMENT");
+    CHECK(std::ranges::none_of(semantic_relations, [](const auto& relation) {
+            return relation.source_id == 1205U || relation.target_id == 1205U ||
+                   relation.source_id == 1206U || relation.target_id == 1206U;
+          }),
+          "evaluation features are not exposed as semantic relationship endpoints");
     CHECK(contains_relation(SemanticRelationKind::in_assembly, 1201U, 700U, 0U,
                             SemanticRelationOrigin::assembly_membership) &&
               contains_relation(SemanticRelationKind::in_assembly, 1202U, 700U, 1U,

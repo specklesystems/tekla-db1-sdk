@@ -478,8 +478,14 @@ class SemanticRelationReader final : public BatchReader {
   };
 
   [[nodiscard]] bool valid_edge(std::uint32_t source, std::uint32_t target) const {
-    return source != 0U && target != 0U && source != target && endpoints_.contains(source) &&
-           endpoints_.contains(target);
+    if (source == 0U || target == 0U || source == target || !endpoints_.contains(source) ||
+        !endpoints_.contains(target)) {
+      return false;
+    }
+    const auto source_kind = kinds_.find(source);
+    const auto target_kind = kinds_.find(target);
+    return source_kind != kinds_.end() && target_kind != kinds_.end() &&
+           is_model_element(source_kind->second) && is_model_element(target_kind->second);
   }
 
   bool append_subelement(std::uint32_t parent, std::uint32_t child,

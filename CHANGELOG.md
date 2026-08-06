@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file. The project
 uses semantic versioning for its public C++ package, subject to the pre-1.0 API
 compatibility policy in the support matrix.
 
+## Unreleased
+
+### Added
+
+- `ObjectRole`, `object_role`, and `is_model_element` distinguish independently
+  publishable model elements from Boolean-part and cut-plane evaluation
+  features while retaining all persisted identities for raw processing.
+
+### Changed
+
+- Evaluation features are no longer emitted as endpoints in normalized
+  semantic relationships.
+
 ## 0.1.0 - 2026-08-04
 
 Initial release candidate of the read-only, output-neutral C++20 SDK.

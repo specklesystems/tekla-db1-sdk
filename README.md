@@ -79,7 +79,9 @@ member-to-assembly with ordinal zero reserved for the persisted main member,
 `connects_to` follows persisted component primary-to-secondary roles, and
 `hosted_on` is reinforcement-to-structural-host.
 Every semantic edge has two live object endpoints; self-edges and dangling
-references are omitted.
+references are omitted. Boolean parts and cut planes remain available in raw
+identity and relationship batches for geometry evaluation and diagnostics, but
+are classified as evaluation features and are not semantic endpoints.
 
 ModelPackage owns or shares immutable source buffers. A processed model emits
 bounded, columnar views. Output adapters depend on those views and never on
