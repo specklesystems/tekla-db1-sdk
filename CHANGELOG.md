@@ -16,6 +16,12 @@ compatibility policy in the support matrix.
 
 - Evaluation features are no longer emitted as endpoints in normalized
   semantic relationships.
+- Polyline-part sections retain their local transverse offset as the transported
+  frame turns, and sharp stations use mitered section scaling.
+- Fitted form-60/form-70 parts build their operative envelope through the
+  persisted fitting planes before the final half-space clips are applied.
+- Topology keeps non-planar cutter meshes and reversing polyline hosts on the
+  exact faceted path instead of promoting them to a different analytic solid.
 
 ## 0.1.0 - 2026-08-04
 

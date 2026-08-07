@@ -246,8 +246,8 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
       append_attribute_link(604, 504);
     }
   } else if (table.name == "relation") {
-    const auto append_relation = [&](std::uint32_t id, std::uint32_t type,
-                                     std::uint32_t source, std::uint32_t target) {
+    const auto append_relation = [&](std::uint32_t id, std::uint32_t type, std::uint32_t source,
+                                     std::uint32_t target) {
       bytes.push_back(std::byte{0});
       append_u32(bytes, id);
       append_u32(bytes, type);
@@ -270,9 +270,14 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
         append_relation(806U, 12U, 1201U, 1206U);
       }
     } else {
-      append_relation(800U, edge_chamfer ? 79U : boolean_operative ? 11U : 9U,
+      append_relation(800U,
+                      edge_chamfer        ? 79U
+                      : boolean_operative ? 11U
+                                          : 9U,
                       boolean_operative ? 700U : 1201U,
-                      edge_chamfer ? 990U : boolean_operative ? 1201U : 700U);
+                      edge_chamfer        ? 990U
+                      : boolean_operative ? 1201U
+                                          : 700U);
     }
   } else if ((component_fixture || report_fixture) && table.name == "string") {
     const auto append_string = [&](std::uint32_t id, std::uint32_t next, std::string_view value) {
@@ -1517,9 +1522,9 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     CHECK(relations == 1, "one relation is emitted");
   }
 
-  for (const auto format : {std::string_view{"8.74"}, std::string_view{"8.95"},
-                            std::string_view{"9.08"}, std::string_view{"9.21"},
-                            std::string_view{"9.52"}, std::string_view{"9.66"}}) {
+  for (const auto format :
+       {std::string_view{"8.74"}, std::string_view{"8.95"}, std::string_view{"9.08"},
+        std::string_view{"9.21"}, std::string_view{"9.52"}, std::string_view{"9.66"}}) {
     const auto relationship_bytes = database_with_relationship_semantics(format);
     ModelPackage relationship_package;
     relationship_package.add(
@@ -1555,8 +1560,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
         } else if (batch.value().kind == BatchKind::relations) {
           for (const auto& relation : batch.value().relations) {
             saw_raw_boolean_relation |= relation.relation_id == 805U && relation.type == 11U &&
-                                        relation.source_id == 1201U &&
-                                        relation.target_id == 1205U;
+                                        relation.source_id == 1201U && relation.target_id == 1205U;
             saw_raw_cut_relation |= relation.relation_id == 806U && relation.type == 12U &&
                                     relation.source_id == 1201U && relation.target_id == 1206U;
           }
@@ -1575,7 +1579,8 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
             "evaluation feature relations remain available through raw relation batches");
     }
     CHECK(semantic_relations.size() == 9U,
-          "persisted hierarchy, assembly, hosting, and connection semantics produce nine deduplicated edges");
+          "persisted hierarchy, assembly, hosting, and connection semantics produce nine "
+          "deduplicated edges");
     for (const auto& relation : semantic_relations) {
       CHECK(relation.source_id != relation.target_id && object_ids.contains(relation.source_id) &&
                 object_ids.contains(relation.target_id),
@@ -1602,15 +1607,18 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     CHECK(contains_relation(SemanticRelationKind::subelement, 1203U, 1202U, 0U,
                             SemanticRelationOrigin::stored_relation),
           "stored relation type 12 supplements SUBELEMENT deterministically");
-    CHECK(std::ranges::count_if(semantic_relations, [](const auto& relation) {
-            return relation.kind == SemanticRelationKind::subelement &&
-                   relation.source_id == 1201U && relation.target_id == 1202U;
-          }) == 1,
+    CHECK(std::ranges::count_if(semantic_relations,
+                                [](const auto& relation) {
+                                  return relation.kind == SemanticRelationKind::subelement &&
+                                         relation.source_id == 1201U && relation.target_id == 1202U;
+                                }) == 1,
           "a stored route overlapping an object parent does not duplicate SUBELEMENT");
-    CHECK(std::ranges::none_of(semantic_relations, [](const auto& relation) {
-            return relation.source_id == 1205U || relation.target_id == 1205U ||
-                   relation.source_id == 1206U || relation.target_id == 1206U;
-          }),
+    CHECK(std::ranges::none_of(semantic_relations,
+                               [](const auto& relation) {
+                                 return relation.source_id == 1205U ||
+                                        relation.target_id == 1205U ||
+                                        relation.source_id == 1206U || relation.target_id == 1206U;
+                               }),
           "evaluation features are not exposed as semantic relationship endpoints");
     CHECK(contains_relation(SemanticRelationKind::in_assembly, 1201U, 700U, 0U,
                             SemanticRelationOrigin::assembly_membership) &&
@@ -2513,15 +2521,15 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
             }
           }
           saw_polybeam_mesh = mesh.positions.size() == 108 && mesh.indices.size() == 204 &&
-                              std::abs(first_ring_center[0] - 10.0) < 1e-4 &&
-                              std::abs(first_ring_center[1] - 20.0) < 1e-4 &&
+                              std::abs(first_ring_center[0] - 85.8578644) < 1e-4 &&
+                              std::abs(first_ring_center[1] - 14.1421356) < 1e-4 &&
                               std::abs(first_ring_center[2] - 30.0) < 1e-4;
         }
       }
     }
     CHECK(saw_polybeam_definition, "the point plus type-3 polygon becomes a public polyline path");
     CHECK(saw_polybeam_mesh,
-          "the solid round profile is swept and capped along every path station");
+          "the eccentric solid profile is swept on its persisted reference path");
   }
 
   const auto lofted_bytes =
@@ -3014,10 +3022,12 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
           }
         }
       }
-      constexpr std::array<float, 6> expected_bounds{-1.31370854F, 8.68629169F, 14.0F,
-                                                     1021.31372F,  536.0F,      46.0F};
-      CHECK(mesh_count == 1U && vertex_count == 161U && triangle_count == 94U &&
-                actual_bounds == expected_bounds,
+      constexpr std::array<float, 6> expected_bounds{74.5442F, 2.82843F, 14.0F,
+                                                     1125.46F, 550.912F, 46.0F};
+      const bool bounds_match = std::equal(
+          actual_bounds.begin(), actual_bounds.end(), expected_bounds.begin(),
+          [](float actual, float expected) { return std::abs(actual - expected) < 0.01F; });
+      CHECK(mesh_count == 1U && vertex_count == 192U && triangle_count == 112U && bounds_match,
             "a polyline host with a persisted cut emits one evaluated display solid");
       CHECK(diagnostic_count == 0U,
             "the retained polyline recipe reaches topology without a fallback diagnostic");

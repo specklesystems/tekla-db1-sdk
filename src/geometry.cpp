@@ -1851,14 +1851,28 @@ void append_vertex(MeshData& mesh, Vector3d value) {
       y_axis = scale(y_axis, -1.0);
       z_axis = scale(z_axis, -1.0);
     }
-    recipe.stations.push_back({.origin = path[station], .y_axis = y_axis, .z_axis = z_axis});
+    Vector3d section_y = y_axis;
+    Vector3d section_z = z_axis;
+    if (station > 0U && station + 1U < path.size()) {
+      const auto bend_normal = normalized(cross(tangents[station - 1U], tangents[station]));
+      const double cosine = dot(*unit_tangent, tangents[station - 1U]);
+      if (bend_normal && cosine > 1.0e-12) {
+        const double side_scale = 1.0 / cosine;
+        if (std::abs(dot(y_axis, *bend_normal)) >= std::abs(dot(z_axis, *bend_normal))) {
+          section_z = scale(section_z, side_scale);
+        } else {
+          section_y = scale(section_y, side_scale);
+        }
+      }
+    }
+    recipe.stations.push_back({.origin = path[station], .y_axis = section_y, .z_axis = section_z});
     for (const auto& coordinate : section.outer) {
-      append_vertex(mesh, add(path[station],
-                              add(scale(y_axis, coordinate[0]), scale(z_axis, coordinate[1]))));
+      append_vertex(mesh, add(path[station], add(scale(section_y, coordinate[0]),
+                                                 scale(section_z, coordinate[1]))));
     }
     for (const auto& coordinate : section.inner) {
-      append_vertex(mesh, add(path[station],
-                              add(scale(y_axis, coordinate[0]), scale(z_axis, coordinate[1]))));
+      append_vertex(mesh, add(path[station], add(scale(section_y, coordinate[0]),
+                                                 scale(section_z, coordinate[1]))));
     }
     previous_y = y_axis;
     previous_z = z_axis;
@@ -1911,13 +1925,61 @@ void append_vertex(MeshData& mesh, Vector3d value) {
   return mesh;
 }
 
-[[nodiscard]] std::vector<Vector3d> section_path(std::span<const Vector3d> reference_path,
-                                                 Vector3d section_origin) {
-  std::vector<Vector3d> result(reference_path.begin(), reference_path.end());
-  if (result.empty()) return result;
-  const auto translation = subtract(section_origin, result.front());
-  for (auto& station : result) station = add(station, translation);
+[[nodiscard]] std::optional<std::vector<Vector3d>> evaluated_polybeam_path(
+    std::span<const Vector3d> reference_path, Vector3d section_origin,
+    double curvature_tolerance = 2.0e-6) {
+  if (reference_path.size() < 2U || curvature_tolerance < 0.0) return std::nullopt;
+  const auto segment_direction = [](Vector3d start, Vector3d end) {
+    return normalized(subtract(end, start));
+  };
+  auto retained_direction = segment_direction(reference_path[0], reference_path[1]);
+  if (!retained_direction) return std::nullopt;
+  std::vector<Vector3d> result;
+  result.reserve(reference_path.size());
+  result.push_back(reference_path.front());
+  for (std::size_t index = 1U; index + 1U < reference_path.size(); ++index) {
+    const auto current_direction =
+        segment_direction(reference_path[index], reference_path[index + 1U]);
+    if (!current_direction) return std::nullopt;
+    const double direction_delta =
+        1.0 - std::clamp(dot(*retained_direction, *current_direction), -1.0, 1.0);
+    if (direction_delta < curvature_tolerance) continue;
+    result.push_back(reference_path[index]);
+    retained_direction = current_direction;
+  }
+  result.push_back(reference_path.back());
+  if (result.size() >= reference_path.size()) return result;
+
+  const auto tangent = segment_direction(result[0], result[1]);
+  if (!tangent) return std::nullopt;
+  const double advance = dot(subtract(section_origin, result[0]), *tangent);
+  const auto translation = scale(*tangent, advance);
+  result[0] = add(result[0], translation);
+  if (result.size() == 2U) result[1] = add(result[1], translation);
   return result;
+}
+
+[[nodiscard]] std::optional<MeshData> sweep_polybeam(std::uint64_t object_id,
+                                                     const Section& persisted_section,
+                                                     std::span<const Vector3d> reference_path,
+                                                     Vector3d section_origin,
+                                                     Vector3d section_y_axis,
+                                                     Vector3d section_z_axis) {
+  const auto path = evaluated_polybeam_path(reference_path, section_origin);
+  if (!path) return std::nullopt;
+  Section section = persisted_section;
+  const auto reference_to_section = subtract(section_origin, reference_path.front());
+  const double offset_y = dot(reference_to_section, section_y_axis);
+  const double offset_z = dot(reference_to_section, section_z_axis);
+  const auto position = [&](std::vector<std::array<double, 2>>& contour) {
+    for (auto& coordinate : contour) {
+      coordinate[0] += offset_y;
+      coordinate[1] += offset_z;
+    }
+  };
+  position(section.outer);
+  position(section.inner);
+  return sweep_path(object_id, section, *path, section_y_axis, section_z_axis);
 }
 
 [[nodiscard]] const TableSchema* populated_table(const ModelStorage& storage, const Schema& schema,
@@ -2201,9 +2263,8 @@ class GeometryReader final : public BatchReader {
             definitions_.back().catalog_report_scalars_eligible = true;
           }
           if (definition.kind == DefinitionGeometryKind::polyline_extrusion) {
-            const auto display_path = section_path(definition.path, definition.origin);
-            const auto mesh =
-                sweep_path(object_id, section, display_path, definition.y_axis, definition.z_axis);
+            const auto mesh = sweep_polybeam(object_id, section, definition.path, definition.origin,
+                                             definition.y_axis, definition.z_axis);
             if (mesh) {
               mesh_data_.push_back(std::move(*mesh));
             } else {
@@ -2397,6 +2458,39 @@ class GeometryReader final : public BatchReader {
     }
   }
 
+  void extend_operative_to_fittings(std::uint32_t object_id, const Section& section,
+                                    DefinitionGeometryView& definition) const {
+    const auto found = operations_.find(object_id);
+    if (found == operations_.end() || section.outer.empty()) return;
+    std::vector<double> intercepts{0.0, definition.length};
+    bool has_fitting = false;
+    for (const auto& operation : found->second) {
+      if (operation.type != 9U && operation.type != 12U) continue;
+      const auto coordinate_system = coordinate_systems_.find(operation.target_id);
+      if (coordinate_system == coordinate_systems_.end()) continue;
+      const auto axes = axes_.find(coordinate_system->second.axes_id);
+      if (axes == axes_.end()) continue;
+      const auto normal = normalized(cross(axes->second.x, axes->second.y));
+      if (!normal) continue;
+      const double denominator = dot(definition.x_axis, *normal);
+      if (std::abs(denominator) <= 1.0e-12) continue;
+      has_fitting = true;
+      for (const auto coordinate : section.outer) {
+        const auto section_point = add(
+            definition.origin,
+            add(scale(definition.y_axis, coordinate[0]), scale(definition.z_axis, coordinate[1])));
+        intercepts.push_back(
+            dot(subtract(coordinate_system->second.origin, section_point), *normal) / denominator);
+      }
+    }
+    if (!has_fitting) return;
+    const auto [minimum, maximum] = std::minmax_element(intercepts.begin(), intercepts.end());
+    const double envelope_min = *minimum - 1.0;
+    const double envelope_max = *maximum + 1.0;
+    definition.origin = add(definition.origin, scale(definition.x_axis, envelope_min));
+    definition.length = envelope_max - envelope_min;
+  }
+
   [[nodiscard]] std::optional<MeshData> operative_mesh(std::uint32_t object_id,
                                                        double cutter_extension = 0.0,
                                                        bool fill_envelope = true) {
@@ -2479,6 +2573,9 @@ class GeometryReader final : public BatchReader {
       section.inner.clear();
       section.cap.clear();
     }
+    if (attribute->second.form_type == 60U || attribute->second.form_type == 70U) {
+      extend_operative_to_fittings(object_id, section, definition);
+    }
     if (attribute->second.form_type == 4U || attribute->second.form_type == 44U ||
         attribute->second.form_type == 64U || attribute->second.form_type == 74U) {
       const auto persisted = paths_.find(read_u32(tuple, offsets_[8]));
@@ -2489,8 +2586,8 @@ class GeometryReader final : public BatchReader {
       for (const auto delta : persisted->second.points) {
         path.push_back(add(reference->second, delta));
       }
-      path = section_path(path, definition.origin);
-      return sweep_path(object_id, section, path, definition.y_axis, definition.z_axis);
+      return sweep_polybeam(object_id, section, path, definition.origin, definition.y_axis,
+                            definition.z_axis);
     }
     if (const auto arc = legacy_arc(attribute->second.object_class)) {
       const auto path = sample_arc(
@@ -3056,6 +3153,19 @@ class GeometryReader final : public BatchReader {
         mesh.ruled_sweep_recipe->stations.size() < 2U || mesh.ruled_sweep_recipe->loops.empty()) {
       return nullptr;
     }
+    const auto& stations = mesh.ruled_sweep_recipe->stations;
+    for (std::size_t index = 1U; index + 1U < stations.size(); ++index) {
+      const auto incoming =
+          normalized(subtract(stations[index].origin, stations[index - 1U].origin));
+      const auto outgoing =
+          normalized(subtract(stations[index + 1U].origin, stations[index].origin));
+      if (!incoming || !outgoing || dot(*incoming, *outgoing) < -1.0e-12) {
+        // A reversing path makes adjacent swept spans overlap.  A single
+        // ruled shell can then bridge the section wires through the overlap
+        // and describe a different solid than the persisted faceted host.
+        return nullptr;
+      }
+    }
     return &*mesh.ruled_sweep_recipe;
   }
 
@@ -3104,6 +3214,38 @@ class GeometryReader final : public BatchReader {
         return std::nullopt;
       }
       loop.points.push_back(start);
+    }
+    const Vector3d origin = loop.points.front();
+    double extent = 0.0;
+    for (std::size_t index = 1U; index < loop.points.size(); ++index) {
+      extent = std::max(extent, length(subtract(loop.points[index], origin)));
+    }
+    const double planarity_tolerance = std::max(1.0, extent) * 1.0e-10;
+    Vector3d normal;
+    for (std::size_t index = 1U; index + 1U < loop.points.size(); ++index) {
+      normal =
+          cross(subtract(loop.points[index], origin), subtract(loop.points[index + 1U], origin));
+      if (length(normal) > planarity_tolerance * planarity_tolerance) break;
+    }
+    const double normal_length = length(normal);
+    const double vector_length = length(vector);
+    if (!std::isfinite(normal_length) ||
+        normal_length <= planarity_tolerance * planarity_tolerance ||
+        std::abs(dot(normal, vector)) <= normal_length * vector_length * 1.0e-10) {
+      return std::nullopt;
+    }
+    Vector3d area;
+    for (std::size_t index = 0U; index < loop.points.size(); ++index) {
+      const auto current = subtract(loop.points[index], origin);
+      const auto next = subtract(loop.points[(index + 1U) % loop.points.size()], origin);
+      if (length(subtract(next, current)) <= planarity_tolerance ||
+          std::abs(dot(normal, current)) > normal_length * planarity_tolerance) {
+        return std::nullopt;
+      }
+      area = add(area, cross(current, next));
+    }
+    if (std::abs(dot(area, normal)) <= normal_length * planarity_tolerance * planarity_tolerance) {
+      return std::nullopt;
     }
     ExtrusionRecipe recipe{.object_id = object_id, .vector = vector};
     recipe.loops.push_back(std::move(loop));
