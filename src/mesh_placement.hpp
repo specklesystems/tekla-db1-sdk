@@ -13,6 +13,10 @@ struct ProjectedMeshPositions {
   RigidPlacementView placement;
 };
 
+// Shared trust boundary for every feature that relies on a persisted frame as
+// a rigid transform rather than merely carrying it as descriptive metadata.
+[[nodiscard]] bool trustworthy_rigid_placement(const RigidPlacementView& placement) noexcept;
+
 // The only double-to-float display-coordinate seam. A requested local
 // representation falls back for this mesh alone when its candidate frame is
 // not a finite, orthonormal, right-handed rigid placement.

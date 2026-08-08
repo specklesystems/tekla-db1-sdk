@@ -9,10 +9,12 @@
 #include <cstdlib>
 #include <limits>
 #include <optional>
+#include <span>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "mesh_placement.hpp"
 #include "occt/protocol.hpp"
 
 namespace tekla::db1::detail {
@@ -20,7 +22,8 @@ namespace {
 
 constexpr std::size_t kMaximumEntries = 4096U;
 constexpr std::size_t kMaximumBytes = 256U * 1024U * 1024U;
-constexpr double kPlacementTolerance = 1.0e-6;
+constexpr double kAxisAlignmentTolerance = 1.0e-9;
+constexpr double kMaximumRigidReuseFloatUlp = 1.0e-2;
 
 enum class CanonicalizationKind : std::uint8_t { translation, rigid };
 
@@ -58,30 +61,88 @@ struct TranslationAccountingEntry {
   return left[0] * right[0] + left[1] * right[1] + left[2] * right[2];
 }
 
-[[nodiscard]] std::array<double, 3> cross(std::array<double, 3> left,
-                                          std::array<double, 3> right) noexcept {
-  return {left[1] * right[2] - left[2] * right[1], left[2] * right[0] - left[0] * right[2],
-          left[0] * right[1] - left[1] * right[0]};
-}
-
-[[nodiscard]] bool finite(std::array<double, 3> value) noexcept {
-  return std::all_of(value.begin(), value.end(), [](double item) { return std::isfinite(item); });
-}
-
 [[nodiscard]] bool valid(const GeometryEvaluationPlacement& placement) noexcept {
-  if (!finite(placement.origin) || !finite(placement.x_axis) || !finite(placement.y_axis) ||
-      !finite(placement.z_axis)) {
+  return trustworthy_rigid_placement(
+      {.origin = {placement.origin[0], placement.origin[1], placement.origin[2]},
+       .x_axis = {placement.x_axis[0], placement.x_axis[1], placement.x_axis[2]},
+       .y_axis = {placement.y_axis[0], placement.y_axis[1], placement.y_axis[2]},
+       .z_axis = {placement.z_axis[0], placement.z_axis[1], placement.z_axis[2]}});
+}
+
+[[nodiscard]] bool safe_world_float_coordinate(double value) noexcept {
+  const float rounded = static_cast<float>(value);
+  if (!std::isfinite(rounded)) return false;
+  const float lower = std::nextafter(rounded, -std::numeric_limits<float>::infinity());
+  const float upper = std::nextafter(rounded, std::numeric_limits<float>::infinity());
+  return std::max(std::abs(static_cast<double>(rounded) - lower),
+                  std::abs(static_cast<double>(upper) - rounded)) <= kMaximumRigidReuseFloatUlp;
+}
+
+[[nodiscard]] bool safe_world_float_positions(std::span<const double> positions) noexcept {
+  return std::all_of(positions.begin(), positions.end(), safe_world_float_coordinate);
+}
+
+[[nodiscard]] bool safe_world_float_box(const OcctBox& box) noexcept {
+  if (box.size_x == 0.0 && box.size_y == 0.0 && box.size_z == 0.0) return true;
+  return safe_world_float_coordinate(box.x) && safe_world_float_coordinate(box.y) &&
+         safe_world_float_coordinate(box.z) && safe_world_float_coordinate(box.x + box.size_x) &&
+         safe_world_float_coordinate(box.y + box.size_y) &&
+         safe_world_float_coordinate(box.z + box.size_z);
+}
+
+[[nodiscard]] bool safe_world_float_half_spaces(std::span<const OcctHalfSpace> planes) noexcept {
+  return std::all_of(planes.begin(), planes.end(), [](const OcctHalfSpace& plane) {
+    return safe_world_float_coordinate(plane.origin_x) &&
+           safe_world_float_coordinate(plane.origin_y) &&
+           safe_world_float_coordinate(plane.origin_z);
+  });
+}
+
+[[nodiscard]] bool safe_world_float_extrusion(const OcctExtrusion& extrusion) noexcept {
+  for (const auto& loop : extrusion.loops) {
+    if (!safe_world_float_positions(loop.positions)) return false;
+    for (std::size_t index = 0U; index + 2U < loop.positions.size(); index += 3U) {
+      if (!safe_world_float_coordinate(loop.positions[index] + extrusion.vector_x) ||
+          !safe_world_float_coordinate(loop.positions[index + 1U] + extrusion.vector_y) ||
+          !safe_world_float_coordinate(loop.positions[index + 2U] + extrusion.vector_z)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] bool safe_world_float_sweep(const OcctRuledSweep& sweep) noexcept {
+  for (const auto& loop : sweep.loops) {
+    for (const auto& section : loop.sections) {
+      if (!safe_world_float_positions(section.positions)) return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] bool safe_world_float_node(const OcctShapeNode& node) noexcept {
+  if (!safe_world_float_box(node.base) || !safe_world_float_positions(node.base_mesh.positions) ||
+      !safe_world_float_extrusion(node.base_extrusion) ||
+      !safe_world_float_sweep(node.base_ruled_sweep) ||
+      !safe_world_float_half_spaces(node.keep_half_spaces)) {
     return false;
   }
-  const auto unit = [](std::array<double, 3> axis) {
-    return std::abs(dot(axis, axis) - 1.0) <= kPlacementTolerance;
-  };
-  return unit(placement.x_axis) && unit(placement.y_axis) && unit(placement.z_axis) &&
-         std::abs(dot(placement.x_axis, placement.y_axis)) <= kPlacementTolerance &&
-         std::abs(dot(placement.x_axis, placement.z_axis)) <= kPlacementTolerance &&
-         std::abs(dot(placement.y_axis, placement.z_axis)) <= kPlacementTolerance &&
-         dot(cross(placement.x_axis, placement.y_axis), placement.z_axis) >=
-             1.0 - kPlacementTolerance;
+  return std::all_of(node.subtract.begin(), node.subtract.end(), safe_world_float_box);
+}
+
+[[nodiscard]] bool safe_world_float_request(const OcctRequest& request) noexcept {
+  if (!safe_world_float_box(request.base) ||
+      !safe_world_float_positions(request.base_mesh.positions) ||
+      !safe_world_float_half_spaces(request.keep_half_spaces) ||
+      !std::all_of(request.subtract.begin(), request.subtract.end(), safe_world_float_box) ||
+      !std::all_of(request.subtract_meshes.begin(), request.subtract_meshes.end(),
+                   [](const OcctTriangleMesh& mesh) {
+                     return safe_world_float_positions(mesh.positions);
+                   })) {
+    return false;
+  }
+  return std::all_of(request.nodes.begin(), request.nodes.end(), safe_world_float_node);
 }
 
 [[nodiscard]] double canonical(double value) noexcept {
@@ -181,10 +242,11 @@ void localize_half_spaces(std::vector<OcctHalfSpace>& planes,
   const auto aligned = [](std::array<double, 3> axis) {
     return std::count_if(axis.begin(), axis.end(),
                          [](double value) {
-                           return std::abs(std::abs(value) - 1.0) <= kPlacementTolerance;
+                           return std::abs(std::abs(value) - 1.0) <= kAxisAlignmentTolerance;
                          }) == 1 &&
-           std::count_if(axis.begin(), axis.end(),
-                         [](double value) { return std::abs(value) <= kPlacementTolerance; }) == 2;
+           std::count_if(axis.begin(), axis.end(), [](double value) {
+             return std::abs(value) <= kAxisAlignmentTolerance;
+           }) == 2;
   };
   return aligned(placement.x_axis) && aligned(placement.y_axis) && aligned(placement.z_axis);
 }
@@ -362,6 +424,10 @@ Result<OcctMesh> GeometryEvaluationCache::evaluate(const OcctRequest& request,
 Result<OcctMesh> GeometryEvaluationCache::evaluate(const OcctRequest& request,
                                                    const GeometryEvaluationPlacement& placement,
                                                    const Evaluator& evaluator) {
+  if (std::getenv("TEKLA_DB1_DISABLE_OCCT_CACHE") != nullptr ||
+      !safe_world_float_request(request)) {
+    return evaluator(request);
+  }
   auto rigid = rigid_key(request, placement);
   if (!rigid) return evaluate(request, evaluator);
   if (auto cached = impl_->find(*rigid, placement, request.object_id)) {

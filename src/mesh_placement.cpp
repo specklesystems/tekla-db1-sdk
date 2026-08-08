@@ -24,7 +24,9 @@ constexpr double rigid_tolerance = 1.0e-9;
   return finite(axis) && std::abs(dot(axis, axis) - 1.0) <= rigid_tolerance;
 }
 
-[[nodiscard]] bool trustworthy(const RigidPlacementView& placement) noexcept {
+}  // namespace
+
+bool trustworthy_rigid_placement(const RigidPlacementView& placement) noexcept {
   if (!finite(placement.origin) || !unit(placement.x_axis) || !unit(placement.y_axis) ||
       !unit(placement.z_axis)) {
     return false;
@@ -36,6 +38,8 @@ constexpr double rigid_tolerance = 1.0e-9;
   }
   return dot(cross(placement.x_axis, placement.y_axis), placement.z_axis) >= 1.0 - rigid_tolerance;
 }
+
+namespace {
 
 [[nodiscard]] bool finite_positions(std::span<const double> positions) noexcept {
   if (positions.size() % 3U != 0U) return false;
@@ -53,7 +57,7 @@ ProjectedMeshPositions project_mesh_positions(
   ProjectedMeshPositions result;
   result.positions.reserve(model_positions.size());
   if (requested_mode == MeshCoordinateMode::local_with_rigid_placement && candidate_placement &&
-      trustworthy(*candidate_placement) && finite_positions(model_positions)) {
+      trustworthy_rigid_placement(*candidate_placement) && finite_positions(model_positions)) {
     result.coordinate_space = MeshCoordinateMode::local_with_rigid_placement;
     result.placement = *candidate_placement;
     for (std::size_t index = 0U; index < model_positions.size(); index += 3U) {

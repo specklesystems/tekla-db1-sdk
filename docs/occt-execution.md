@@ -109,13 +109,22 @@ results or failing model processing.
 
 Completed top-level topology results have a second, placement-independent
 cache. Its key is the complete worker request after object identifiers have
-been removed and every spatial position has been translated to the root
-origin. Coordinates in the key are rounded to one nanometre in model units to
-discard arithmetic noise introduced by otherwise identical placements;
-directions, dimensions, topology, indices, tolerances, and operation order stay
-byte-exact. A hit translates the retained display mesh to the current origin
-and reuses the exact OCCT surface-area and volume metrics. Rotated, scaled, or
-otherwise changed requests therefore remain distinct. This cache has the same
+been removed and every spatial position has been transformed into the
+validated definition frame. Coordinates in the key are rounded to one
+nanometre in model units to discard arithmetic noise introduced by otherwise
+identical placements; dimensions, topology, indices, tolerances, and operation
+order stay byte-exact. A hit transforms the retained display mesh from its
+stored placement to the current placement and reuses the exact OCCT
+surface-area and volume metrics. Invalid frames fall back to translation-only
+reuse.
+
+OCCT remains evaluated in the original world frame so cache misses preserve
+the evaluator's existing topology and tessellation contract. Before rigid
+lookup or insertion, every request position is checked against model-space
+`float` spacing. Rigid reuse is bypassed when the ULP exceeds 0.01 mm; this
+prevents a far-origin first occurrence from quantizing a later near-origin
+mesh. The rigid trust boundary is the same finite, orthonormal, right-handed
+1e-9 validator used by local display placement. This cache has the same
 4,096-entry and 256 MiB fail-open bounds as the operative cache.
 
 The cache is tested with repeated placements and non-repetitive workloads.

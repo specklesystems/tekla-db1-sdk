@@ -18,8 +18,10 @@ struct GeometryEvaluationPlacement {
 // Owns completed topology evaluations independently of model traversal. The
 // cache canonicalizes validated rigid placement, preserves result ownership,
 // and applies the bounded-memory and diagnostic policy for this expensive
-// evaluator boundary. Callers without an authoritative frame retain the
-// translation-only path.
+// evaluator boundary. Rigid reuse is conservatively bypassed when model-space
+// float spacing exceeds 0.01 mm, so one far-origin occurrence cannot quantize
+// a later near-origin result. Callers without an authoritative frame retain
+// the translation-only path.
 class GeometryEvaluationCache {
  public:
   using Evaluator = std::function<Result<OcctMesh>(const OcctRequest&)>;

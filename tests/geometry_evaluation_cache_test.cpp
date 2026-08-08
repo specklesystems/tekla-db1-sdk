@@ -154,8 +154,12 @@ int main() {
       placement({100.0, -50.0, 20.0}, {0.0, 1.0, 0.0}, {-1.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
   GeometryEvaluationCache rigid_cache;
   std::size_t rigid_evaluations = 0U;
+  bool evaluator_owner_ids_preserved = false;
   const auto rigid_evaluator = [&](const OcctRequest& request) {
     ++rigid_evaluations;
+    evaluator_owner_ids_preserved = request.object_id == 401U && request.nodes.size() == 2U &&
+                                    request.nodes[0].object_id == 401U &&
+                                    request.nodes[1].object_id == 402U;
     const auto& source = request.nodes.front().base_extrusion.loops.front().positions;
     return Result<OcctMesh>::success(
         {.object_id = request.object_id,
@@ -176,6 +180,8 @@ int main() {
   CHECK(rigid_first.has_value() && rigid_translated.has_value() && rigid_rotated.has_value() &&
             rigid_evaluations == 1U,
         "equivalent topology features share a completed result across rigid placement");
+  CHECK(evaluator_owner_ids_preserved,
+        "canonical evaluation preserves root and nested diagnostic owner identities");
   if (rigid_translated) {
     CHECK(rigid_translated.value().positions[0] == 1010.0F &&
               rigid_translated.value().positions[1] == -1980.0F &&
@@ -205,6 +211,44 @@ int main() {
                                                  rotated_frame, rigid_evaluator);
   CHECK(feature_miss.has_value() && rigid_evaluations == 2U,
         "a materially different feature recipe misses the rigid cache");
+
+  const auto far_frame =
+      placement({1.0e9, -1.0e9, 1.0e9}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0});
+  GeometryEvaluationCache far_first_cache;
+  std::size_t far_first_evaluations = 0U;
+  const auto far_first_evaluator = [&](const OcctRequest& request) {
+    ++far_first_evaluations;
+    return rigid_evaluator(request);
+  };
+  const auto far_first = far_first_cache.evaluate(placed_feature_request(610U, far_frame),
+                                                  far_frame, far_first_evaluator);
+  const auto near_after_far = far_first_cache.evaluate(placed_feature_request(611U, first_frame),
+                                                       first_frame, far_first_evaluator);
+
+  GeometryEvaluationCache near_first_cache;
+  std::size_t near_first_evaluations = 0U;
+  const auto near_first_evaluator = [&](const OcctRequest& request) {
+    ++near_first_evaluations;
+    return rigid_evaluator(request);
+  };
+  const auto near_first = near_first_cache.evaluate(placed_feature_request(612U, first_frame),
+                                                    first_frame, near_first_evaluator);
+  const auto far_after_near = near_first_cache.evaluate(placed_feature_request(613U, far_frame),
+                                                        far_frame, near_first_evaluator);
+  CHECK(far_first.has_value() && near_after_far.has_value() && near_first.has_value() &&
+            far_after_near.has_value() && far_first_evaluations == 2U &&
+            near_first_evaluations == 2U,
+        "unsafe far-origin placement bypasses rigid reuse in either encounter order");
+  if (near_after_far && near_first) {
+    CHECK(near_after_far.value().positions == near_first.value().positions &&
+              near_after_far.value().positions.size() == 6U &&
+              near(near_after_far.value().positions[3] - near_after_far.value().positions[0], 2.0),
+          "a far-origin first encounter cannot collapse a later near-origin edge");
+    CHECK(near_after_far.value().has_exact_metrics && near_first.value().has_exact_metrics &&
+              near_after_far.value().exact_surface_area == near_first.value().exact_surface_area &&
+              near_after_far.value().exact_volume == near_first.value().exact_volume,
+          "encounter-order-independent rigid reuse preserves exact metrics");
+  }
 
   const auto invalid_frame =
       placement({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
@@ -239,6 +283,25 @@ int main() {
                 .has_value() &&
             reflected_frame_evaluations == 2U,
         "a reflected frame falls back without entering rigid canonicalization");
+
+  const auto loose_tolerance_frame = placement(
+      {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {5.0e-7, std::sqrt(1.0 - 2.5e-13), 0.0}, {0.0, 0.0, 1.0});
+  GeometryEvaluationCache loose_tolerance_cache;
+  std::size_t loose_tolerance_evaluations = 0U;
+  const auto loose_tolerance_evaluator = [&](const OcctRequest& request) {
+    ++loose_tolerance_evaluations;
+    return Result<OcctMesh>::success({.object_id = request.object_id});
+  };
+  CHECK(loose_tolerance_cache
+                .evaluate(placed_feature_request(910U, first_frame), loose_tolerance_frame,
+                          loose_tolerance_evaluator)
+                .has_value() &&
+            loose_tolerance_cache
+                .evaluate(placed_feature_request(911U, rotated_frame), loose_tolerance_frame,
+                          loose_tolerance_evaluator)
+                .has_value() &&
+            loose_tolerance_evaluations == 2U,
+        "cache placement validation shares the public mesh projection's 1e-9 trust boundary");
 
   set_cache_disabled(true);
   GeometryEvaluationCache disabled_cache;
