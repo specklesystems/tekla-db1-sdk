@@ -127,6 +127,12 @@ struct TaperedSection {
   std::vector<std::array<double, 2>> end;
 };
 
+struct ParametricRoundProfile {
+  std::vector<std::array<double, 2>> outer;
+  std::vector<std::array<double, 2>> inner;
+  double nominal_radius = 0.0;
+};
+
 struct TaperedIParameters {
   double start_height = 0.0;
   double end_height = 0.0;
@@ -1563,6 +1569,152 @@ void append_vertex(MeshData& mesh, Vector3d value) {
   return mesh;
 }
 
+[[nodiscard]] bool is_parametric_round_profile(std::string_view raw_profile) {
+  const auto profile = uppercase(raw_profile);
+  const bool sphere = profile.starts_with("SPHERE");
+  const bool cap = profile.starts_with("CAP");
+  if (!sphere && !cap) return false;
+  const auto prefix_length =
+      sphere ? std::string_view("SPHERE").size() : std::string_view("CAP").size();
+  const auto diameter = number(std::string_view(profile).substr(prefix_length));
+  return diameter && std::isfinite(*diameter) && *diameter > 0.0;
+}
+
+[[nodiscard]] std::optional<ParametricRoundProfile> parametric_round_profile(
+    std::string_view raw_profile, double length) {
+  const auto profile = uppercase(raw_profile);
+  const bool sphere = profile.starts_with("SPHERE");
+  const bool cap = profile.starts_with("CAP");
+  if (!is_parametric_round_profile(profile) || !std::isfinite(length) || length <= 0.0) {
+    return std::nullopt;
+  }
+  const auto prefix_length =
+      sphere ? std::string_view("SPHERE").size() : std::string_view("CAP").size();
+  const auto diameter = number(std::string_view(profile).substr(prefix_length));
+
+  constexpr std::array<double, 15> locations{0.0,  0.02, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50,
+                                             0.60, 0.70, 0.80, 0.90, 0.95, 0.98, 1.0};
+  constexpr std::array<double, 15> radius_factors{0.0,  0.28,  0.436, 0.60, 0.80,  0.917, 0.98, 1.0,
+                                                  0.98, 0.917, 0.80,  0.60, 0.436, 0.28,  0.0};
+  constexpr double end_radius = 2.0;
+  constexpr double cap_thickness = 16.0;
+  // Tekla's public catalog identifies these as PROFILE_USER_PARAMETRIC
+  // subtype 999015 (SPHERE) and 999112 (CAP). The station population above,
+  // the 20-point cross sections below, and the CAP inner skin are corroborated
+  // against those catalog records and evaluated solids rather than inferred
+  // from the profile spelling alone.
+  const double radius = *diameter / 2.0;
+  if (cap && (radius <= cap_thickness || length <= 4.0 * cap_thickness)) {
+    return std::nullopt;
+  }
+
+  ParametricRoundProfile result{.nominal_radius = radius};
+  const std::size_t outer_count = cap ? 8U : locations.size();
+  result.outer.reserve(outer_count);
+  for (std::size_t index = 0; index < outer_count; ++index) {
+    result.outer.push_back(
+        {locations[index] * length, std::max(end_radius, radius_factors[index] * radius)});
+  }
+  if (!cap) return result;
+
+  const double inner_radius = radius - cap_thickness;
+  result.inner.reserve(outer_count);
+  for (std::size_t index = 0; index < outer_count; ++index) {
+    result.inner.push_back({locations[index] * length + cap_thickness,
+                            std::max(end_radius, radius_factors[index] * inner_radius)});
+  }
+  const double cap_end = length / 2.0;
+  const auto previous = result.inner[result.inner.size() - 2U];
+  const auto terminal = result.inner.back();
+  if (previous[0] >= cap_end || terminal[0] <= cap_end) return std::nullopt;
+  const double parameter = (cap_end - previous[0]) / (terminal[0] - previous[0]);
+  result.inner.back() = {cap_end, previous[1] + parameter * (terminal[1] - previous[1])};
+  return result;
+}
+
+[[nodiscard]] MeshData parametric_round_mesh(std::uint64_t object_id,
+                                             const ParametricRoundProfile& profile,
+                                             const DefinitionGeometryView& definition) {
+  constexpr std::uint32_t segment_count = 20U;
+  constexpr std::array<std::array<double, 2>, segment_count> circle{{
+      {1.0, 0.0},  {0.951, 0.309},   {0.809, 0.588},   {0.588, 0.809},   {0.309, 0.951},
+      {0.0, 1.0},  {-0.309, 0.951},  {-0.588, 0.809},  {-0.809, 0.588},  {-0.951, 0.309},
+      {-1.0, 0.0}, {-0.951, -0.309}, {-0.809, -0.588}, {-0.588, -0.809}, {-0.309, -0.951},
+      {0.0, -1.0}, {0.309, -0.951},  {0.588, -0.809},  {0.809, -0.588},  {0.951, -0.309},
+  }};
+  constexpr std::array<std::array<double, 2>, segment_count> end_circle{{
+      {1.0, 0.0},  {0.95, 0.31},   {0.81, 0.59},   {0.59, 0.81},   {0.31, 0.95},
+      {0.0, 1.0},  {-0.31, 0.95},  {-0.59, 0.81},  {-0.81, 0.59},  {-0.95, 0.31},
+      {-1.0, 0.0}, {-0.95, -0.31}, {-0.81, -0.59}, {-0.59, -0.81}, {-0.31, -0.95},
+      {0.0, -1.0}, {0.31, -0.95},  {0.59, -0.81},  {0.81, -0.59},  {0.95, -0.31},
+  }};
+  MeshData mesh{.object_id = object_id};
+  const auto append_rings = [&](const std::vector<std::array<double, 2>>& rings) {
+    for (const auto [station, radius] : rings) {
+      const auto& coordinates = radius <= 2.0 + 1.0e-12 ? end_circle : circle;
+      for (std::uint32_t segment = 0; segment < segment_count; ++segment) {
+        append_vertex(mesh, point(definition.origin, definition.x_axis, definition.y_axis,
+                                  definition.z_axis, station, radius * coordinates[segment][0],
+                                  radius * coordinates[segment][1]));
+      }
+    }
+  };
+  append_rings(profile.outer);
+  append_rings(profile.inner);
+
+  const auto quad = [&](std::uint32_t a, std::uint32_t b, std::uint32_t c, std::uint32_t d) {
+    mesh.indices.insert(mesh.indices.end(), {a, b, c, a, c, d});
+  };
+  const auto connect_rings = [&](std::uint32_t base, std::size_t ring_count, bool reverse) {
+    for (std::uint32_t ring = 0; ring + 1U < ring_count; ++ring) {
+      const auto current = base + ring * segment_count;
+      const auto following = current + segment_count;
+      for (std::uint32_t segment = 0; segment < segment_count; ++segment) {
+        const auto next = (segment + 1U) % segment_count;
+        if (reverse) {
+          quad(current + next, current + segment, following + segment, following + next);
+        } else {
+          quad(current + segment, current + next, following + next, following + segment);
+        }
+      }
+    }
+  };
+  connect_rings(0U, profile.outer.size(), false);
+
+  if (profile.inner.empty()) {
+    const auto last = static_cast<std::uint32_t>(profile.outer.size() - 1U) * segment_count;
+    for (std::uint32_t segment = 1U; segment + 1U < segment_count; ++segment) {
+      mesh.indices.insert(mesh.indices.end(), {0U, segment + 1U, segment});
+      mesh.indices.insert(mesh.indices.end(), {last, last + segment, last + segment + 1U});
+    }
+    return mesh;
+  }
+
+  const auto inner_base = static_cast<std::uint32_t>(profile.outer.size()) * segment_count;
+  connect_rings(inner_base, profile.inner.size(), true);
+  const auto outer_end = static_cast<std::uint32_t>(profile.outer.size() - 1U) * segment_count;
+  const auto inner_end =
+      inner_base + static_cast<std::uint32_t>(profile.inner.size() - 1U) * segment_count;
+  for (std::uint32_t segment = 0; segment < segment_count; ++segment) {
+    const auto next = (segment + 1U) % segment_count;
+    quad(segment, next, inner_base + next, inner_base + segment);
+    quad(outer_end + next, outer_end + segment, inner_end + segment, inner_end + next);
+  }
+  return mesh;
+}
+
+[[nodiscard]] Section nominal_parametric_round_section(const ParametricRoundProfile& profile) {
+  Section result{.kind = profile.inner.empty() ? Section::Kind::solid : Section::Kind::hollow,
+                 .outer = circle(profile.nominal_radius * 2.0, 20),
+                 .circular_outer_radius = profile.nominal_radius};
+  if (!profile.inner.empty()) {
+    const double inner_radius = profile.nominal_radius - 16.0;
+    result.inner = circle(inner_radius * 2.0, 20);
+    result.circular_inner_radius = inner_radius;
+  }
+  return result;
+}
+
 [[nodiscard]] std::optional<MeshData> loft_plate(std::uint64_t object_id,
                                                  const LoftRails& persisted,
                                                  const DefinitionGeometryView& definition,
@@ -2248,6 +2400,11 @@ class GeometryReader final : public BatchReader {
         } else if (auto tapered = tapered_ellipse(definition.profile)) {
           set_tapered_section_metrics(definitions_.back(), *tapered);
           mesh_data_.push_back(loft(object_id, *tapered, definition));
+        } else if (auto parametric =
+                       parametric_round_profile(definition.profile, definition.length)) {
+          auto nominal = nominal_parametric_round_section(*parametric);
+          set_section_metrics(definitions_.back(), nominal);
+          mesh_data_.push_back(parametric_round_mesh(object_id, *parametric, definition));
         } else if (auto analytic = parse_section(definition.profile);
                    analytic || profiles_.find(definition.profile) != nullptr) {
           Section section;
@@ -2570,6 +2727,9 @@ class GeometryReader final : public BatchReader {
     }
     if (auto tapered = tapered_ellipse(definition.profile)) {
       return loft(object_id, *tapered, definition);
+    }
+    if (auto parametric = parametric_round_profile(definition.profile, definition.length)) {
+      return parametric_round_mesh(object_id, *parametric, definition);
     }
     auto analytic = parse_section(definition.profile);
     Section section;
@@ -3317,6 +3477,12 @@ class GeometryReader final : public BatchReader {
     const auto basis = axes_.find(read_u32(tuple, offsets_[2]));
     if (attribute == attributes_.end() || basis == axes_.end()) return;
     const auto form_type = attribute->second.form_type;
+    if (is_parametric_round_profile(attribute->second.profile)) {
+      // CAP/SPHERE rings are axial profile stations, not the two end rings of
+      // a prism. Extending their tiny terminal rings changes the persisted
+      // ellipsoid before its transverse cut/add operations are evaluated.
+      return;
+    }
     if (form_type == 2U || form_type == 4U || form_type == 8U || form_type == 44U ||
         form_type == 62U || form_type == 64U || form_type == 74U || form_type == 82U ||
         form_type == 105U || form_type == 115U || legacy_arc(attribute->second.object_class)) {
@@ -3838,7 +4004,9 @@ class GeometryReader final : public BatchReader {
       if (!boolean_operation || !replay_boolean_children ||
           !boolean_targets.insert(operation.target_id).second)
         continue;
-      auto operand = operative_mesh(operation.target_id, 0.0, true);
+      const bool addition =
+          operation.type == 38U || operand_object_type(operation.target_id) == 38U;
+      auto operand = operative_mesh(operation.target_id, 0.0, !addition);
       if (!operand) {
         ++graph.partial_results;
         add_diagnostic(ErrorCode::invalid_geometry, object_id,
@@ -3853,7 +4021,7 @@ class GeometryReader final : public BatchReader {
       // the public API. DB1 stores those operatives as part obj_type 38, 11,
       // and 39 respectively. Additions belong to this host by relation and
       // may form a chain beyond the raw host bounds, so retain all of them.
-      if (operation.type == 38U || operand_object_type(operation.target_id) == 38U) {
+      if (addition) {
         boolean_bounds.minimum.x = std::min(boolean_bounds.minimum.x, bounds->minimum.x);
         boolean_bounds.minimum.y = std::min(boolean_bounds.minimum.y, bounds->minimum.y);
         boolean_bounds.minimum.z = std::min(boolean_bounds.minimum.z, bounds->minimum.z);

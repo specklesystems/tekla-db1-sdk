@@ -43,6 +43,7 @@ guessed geometry.
 | Literal rectangular and plate profiles | Implemented | Analytic extrusion. |
 | Literal angle, round, and hollow profiles | Implemented | Analytic extrusion for self-describing dimensions. |
 | Catalog-backed profiles | Implemented subset | Model-local LIS outlines and a built-in nominal steel subset, including the EN 10365 `PFC200*90*30` channel; unresolved profiles remain explicit diagnostics. |
+| User-parametric profiles | Implemented subset | Catalog-corroborated `SPHEREd` subtype 999015 and `CAPd` subtype 999112 multi-cross-section rings are reconstructed; other user-parametric subtypes remain explicit diagnostics. |
 | Curved beams and polybeams | Implemented subset | Persisted zero-radius polyline paths and legacy circular-arc members retain their 2D section, ordered path stations, and transported frames through direct tessellation and optional topology. Circular revolution is used only after rigid-section validation; otherwise all retained sections form a ruled sweep. |
 | Contour plates | Implemented subset | Persisted chamfered contours are triangulated and extruded. Alternate contour encodings that do not expose the supported persisted polygon path remain explicit diagnostics. |
 | Legacy lofted plates | Implemented | Type/subtype 1000/1000 rail trees are decoded from six-value segment arrays and thickened as ruled surfaces. |

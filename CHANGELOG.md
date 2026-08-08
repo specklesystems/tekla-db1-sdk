@@ -28,6 +28,11 @@ compatibility policy in the support matrix.
 - The built-in nominal steel fallback resolves the EN 10365
   `PFC200*90*30` channel with its published dimensions, root radii, area, and
   cover perimeter when a model-local LIS catalog is unavailable.
+- Proven `SPHEREd` and `CAPd` user-parametric profiles emit their persisted
+  multi-cross-section solids, including the CAP inner skin, before ordinary
+  fittings and Boolean operations are evaluated.
+- Boolean-add operands preserve hollow profile material instead of fusing the
+  filled outer envelope used by subtractive cutters.
 
 ### Changed
 

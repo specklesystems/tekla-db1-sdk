@@ -1600,7 +1600,10 @@ void append_boolean_chain_table(std::vector<std::byte>& bytes,
           if (field.name == "obj_type") write_u32(tuple, field.offset, object_type);
           if (field.name == "ben") write_fixed(tuple, field.offset, field.size, "Boolean fixture");
           if (field.name == "prof" || field.name == "Geometry") {
-            write_fixed(tuple, field.offset, field.size, polybeam ? "D32" : "200*200");
+            write_fixed(tuple, field.offset, field.size,
+                        polybeam                         ? "D32"
+                        : additive_operand && id == 902U ? "O200*20"
+                                                         : "200*200");
           }
           if (field.name == "mat") write_fixed(tuple, field.offset, field.size, "S355");
         }
@@ -3155,7 +3158,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
   }
 
   for (const auto& [profile, positions, indices, expected_bounds] :
-       std::array<std::tuple<std::string_view, std::size_t, std::size_t, std::array<float, 6>>, 37>{
+       std::array<std::tuple<std::string_view, std::size_t, std::size_t, std::array<float, 6>>, 39>{
            std::tuple{"IPE200", 168U, 324U,
                       std::array<float, 6>{10.0F, -80.0F, -20.0F, 1010.0F, 120.0F, 80.0F}},
            std::tuple{"HEA120", 168U, 324U,
@@ -3168,6 +3171,10 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
                       std::array<float, 6>{10.0F, -90.0F, -10.0F, 1010.0F, 130.0F, 70.0F}},
            std::tuple{"PFC200*90*30", 96U, 180U,
                       std::array<float, 6>{10.0F, -80.0F, -15.0F, 1010.0F, 120.0F, 75.0F}},
+           std::tuple{"SPHERE60.3", 900U, 1788U,
+                      std::array<float, 6>{10.0F, -10.15F, -0.15F, 1010.0F, 50.15F, 60.15F}},
+           std::tuple{"CAP2135", 960U, 1920U,
+                      std::array<float, 6>{10.0F, -1047.5F, -1037.5F, 510.0F, 1087.5F, 1097.5F}},
            std::tuple{"BL15*130", 24U, 36U,
                       std::array<float, 6>{10.0F, -45.0F, 22.5F, 1010.0F, 85.0F, 37.5F}},
            std::tuple{"HWR77*42", 24U, 36U,
@@ -3185,8 +3192,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
            std::tuple{"O112*10", 240U, 480U,
                       std::array<float, 6>{10.0F, -36.0F, -26.0F, 1010.0F, 76.0F, 86.0F}},
            std::tuple{"SPD2135*16", 912U, 1824U,
-                      std::array<float, 6>{10.0F, -1047.5F, -1037.5F, 1010.0F, 1087.5F,
-                                           1097.5F}},
+                      std::array<float, 6>{10.0F, -1047.5F, -1037.5F, 1010.0F, 1087.5F, 1097.5F}},
            std::tuple{"QR100*5", 48U, 96U,
                       std::array<float, 6>{10.0F, -30.0F, -20.0F, 1010.0F, 70.0F, 80.0F}},
            std::tuple{"RHS90*4", 48U, 96U,
@@ -3981,6 +3987,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     auto processed = additive_model.value().process(request);
     CHECK(processed.has_value(), "the additive Boolean fixture processes");
     float maximum_x = std::numeric_limits<float>::lowest();
+    double host_volume = 0.0;
     if (processed) {
       while (true) {
         auto batch = processed.value()->next();
@@ -3989,6 +3996,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
         if (batch.value().kind != BatchKind::meshes) continue;
         for (const auto& mesh : batch.value().meshes) {
           if (mesh.object_id != 1201U) continue;
+          host_volume = mesh.volume;
           for (std::size_t coordinate = 0U; coordinate < mesh.positions.size(); coordinate += 3U) {
             maximum_x = std::max(maximum_x, mesh.positions[coordinate]);
           }
@@ -3997,6 +4005,8 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     }
     CHECK(maximum_x > 1159.0F,
           "a persisted type-38 Boolean operand adds material beyond the host bounds");
+    CHECK(host_volume > 41'000'000.0 && host_volume < 43'000'000.0,
+          "a hollow type-38 operand adds its material shell rather than its filled envelope");
   }
 
   const auto swept_boolean_bytes = database_with_boolean_chain(2U, false, false, false, true);
