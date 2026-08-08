@@ -7,8 +7,8 @@
 #include "shape.hpp"
 #include "standard_profile.hpp"
 #if defined(TEKLA_DB1_HAS_OCCT)
+#include "geometry_evaluation_cache.hpp"
 #include "occt/occt.hpp"
-#include "occt/protocol.hpp"
 #endif
 
 #include <algorithm>
@@ -3428,8 +3428,6 @@ class GeometryReader final : public BatchReader {
   static constexpr std::size_t maximum_operation_graph_edges = 65'536U;
   static constexpr std::size_t maximum_operative_cache_entries = 4096U;
   static constexpr std::size_t maximum_operative_cache_bytes = 256U * 1024U * 1024U;
-  static constexpr std::size_t maximum_topology_result_cache_entries = 4096U;
-  static constexpr std::size_t maximum_topology_result_cache_bytes = 256U * 1024U * 1024U;
   static constexpr std::size_t maximum_topology_request_mesh_bytes = 256U * 1024U * 1024U;
   static constexpr double operative_linear_deflection = 0.5;
   static constexpr double operative_angular_deflection = 0.5;
@@ -3489,22 +3487,6 @@ class GeometryReader final : public BatchReader {
   struct OperativeCacheEntry {
     std::optional<MeshData> mesh;
     std::optional<Error> failure;
-  };
-
-  struct TopologyResultCacheKeyHash {
-    std::size_t operator()(const std::vector<std::byte>& bytes) const noexcept {
-      std::uint64_t value = 0xcbf29ce484222325ULL;
-      for (const auto byte : bytes) {
-        value ^= std::to_integer<std::uint8_t>(byte);
-        value *= 0x100000001b3ULL;
-      }
-      return static_cast<std::size_t>(value ^ (value >> 32U));
-    }
-  };
-
-  struct TopologyResultCacheEntry {
-    std::array<double, 3> origin{};
-    OcctMesh mesh;
   };
 
   struct MeshBounds {
@@ -3683,52 +3665,6 @@ class GeometryReader final : public BatchReader {
     const bool inserted = operative_cache_.emplace(key, std::move(value)).second;
     if (!inserted) return;
     operative_cache_bytes_ += bytes;
-  }
-
-  [[nodiscard]] std::optional<OcctMesh> cached_topology_result(
-      const TranslationNormalizedOcctRequest& key, std::uint64_t object_id) const {
-    if (std::getenv("TEKLA_DB1_DISABLE_OCCT_CACHE") != nullptr) return std::nullopt;
-    const auto found = topology_result_cache_.find(key.bytes);
-    if (found == topology_result_cache_.end()) return std::nullopt;
-    OcctMesh mesh = found->second.mesh;
-    mesh.object_id = object_id;
-    for (std::size_t index = 0U; index + 2U < mesh.positions.size(); index += 3U) {
-      for (std::size_t axis = 0U; axis < 3U; ++axis) {
-        const double translated = static_cast<double>(mesh.positions[index + axis]) +
-                                  key.origin[axis] - found->second.origin[axis];
-        mesh.positions[index + axis] = static_cast<float>(translated);
-      }
-    }
-    if (std::getenv("TEKLA_DB1_OCCT_CACHE_PROFILE") != nullptr) {
-      std::fprintf(stderr,
-                   "{\"occt_cache\":true,\"object_id\":%llu,\"outcome\":\"hit\","
-                   "\"key_bytes\":%zu}\n",
-                   static_cast<unsigned long long>(object_id), key.bytes.size());
-    }
-    return mesh;
-  }
-
-  void cache_topology_result(TranslationNormalizedOcctRequest key, const OcctMesh& mesh) {
-    if (std::getenv("TEKLA_DB1_DISABLE_OCCT_CACHE") != nullptr) return;
-    const std::size_t bytes = key.bytes.size() + mesh.positions.size() * sizeof(float) +
-                              mesh.indices.size() * sizeof(std::uint32_t) +
-                              sizeof(TopologyResultCacheEntry);
-    if (topology_result_cache_.size() >= maximum_topology_result_cache_entries ||
-        bytes > maximum_topology_result_cache_bytes - topology_result_cache_bytes_) {
-      return;
-    }
-    TopologyResultCacheEntry entry{key.origin, mesh};
-    const bool inserted =
-        topology_result_cache_.emplace(std::move(key.bytes), std::move(entry)).second;
-    if (!inserted) return;
-    topology_result_cache_bytes_ += bytes;
-    if (std::getenv("TEKLA_DB1_OCCT_CACHE_PROFILE") != nullptr) {
-      std::fprintf(stderr,
-                   "{\"occt_cache\":true,\"object_id\":%llu,\"outcome\":\"insert\","
-                   "\"entry_bytes\":%zu,\"total_bytes\":%zu}\n",
-                   static_cast<unsigned long long>(mesh.object_id), bytes,
-                   topology_result_cache_bytes_);
-    }
   }
 
   [[nodiscard]] static bool context_independent_failure(ErrorCode code) noexcept {
@@ -4027,21 +3963,15 @@ class GeometryReader final : public BatchReader {
       return Result<OcctRequest>::success(std::move(request));
     };
     const auto evaluate_request = [&](const OcctRequest& request) {
-      auto key = encode_translation_normalized_occt_request(request);
-      if (key) {
-        if (auto cached = cached_topology_result(key.value(), request.object_id)) {
-          return Result<OcctMesh>::success(std::move(*cached));
-        }
-      }
-      auto evaluated = topology_mode_ == TopologyMode::supervised
-                           ? supervised_host_ != nullptr
-                                 ? supervised_host_->evaluate(request)
-                                 : Result<OcctMesh>::failure(
-                                       {ErrorCode::invalid_argument,
-                                        "A supervised topology worker path was not supplied."})
-                           : direct_host_.evaluate(request);
-      if (evaluated && key) cache_topology_result(std::move(key.value()), evaluated.value());
-      return evaluated;
+      return geometry_evaluation_cache_.evaluate(request, [&](const OcctRequest& uncached) {
+        return topology_mode_ == TopologyMode::supervised
+                   ? supervised_host_ != nullptr
+                         ? supervised_host_->evaluate(uncached)
+                         : Result<OcctMesh>::failure(
+                               {ErrorCode::invalid_argument,
+                                "A supervised topology worker path was not supplied."})
+                   : direct_host_.evaluate(uncached);
+      });
     };
 
     auto request = build_request(graph, false);
@@ -4377,9 +4307,7 @@ class GeometryReader final : public BatchReader {
   std::unordered_map<OperativeCacheKey, OperativeCacheEntry, OperativeCacheKeyHash>
       operative_cache_;
   std::size_t operative_cache_bytes_ = 0U;
-  std::unordered_map<std::vector<std::byte>, TopologyResultCacheEntry, TopologyResultCacheKeyHash>
-      topology_result_cache_;
-  std::size_t topology_result_cache_bytes_ = 0U;
+  GeometryEvaluationCache geometry_evaluation_cache_;
   DirectOcctHost direct_host_;
   std::unique_ptr<SupervisedOcctHost> supervised_host_;
 #endif

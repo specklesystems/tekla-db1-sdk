@@ -112,6 +112,7 @@ if(TEKLA_DB1_ENABLE_OCCT)
   find_package(OpenCASCADE REQUIRED COMPONENTS
     FoundationClasses ModelingData ModelingAlgorithms)
   target_sources(tekla_db1_core PRIVATE
+    src/geometry_evaluation_cache.cpp
     src/occt/evaluator.cpp
     src/occt/protocol.cpp)
   if(UNIX)
