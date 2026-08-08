@@ -89,9 +89,11 @@ enum class PartFrameFixture {
 enum class PolygonWeldFrameFixture {
   orthogonal,
   leg_parallel_to_tangent,
+  leg_almost_parallel_to_tangent,
   reversed_handedness,
   noisy_tangent_component,
   collinear_model_basis,
+  large_model_origin,
 };
 
 void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schema& schema,
@@ -992,9 +994,11 @@ void append_polygon_weld_table(std::vector<std::byte>& bytes,
       for (const auto& field : schema.table_fields(table)) {
         if (field.name == "id") write_u32(tuple, field.offset, 1201U);
         if (field.name == "csys_attr_id") write_u32(tuple, field.offset, 901U);
-        if (field.name == "x1") write_scalar(tuple, field, 100.0);
-        if (field.name == "y1") write_scalar(tuple, field, 200.0);
-        if (field.name == "z1") write_scalar(tuple, field, 300.0);
+        const double origin =
+            frame_fixture == PolygonWeldFrameFixture::large_model_origin ? 1.0e9 : 0.0;
+        if (field.name == "x1") write_scalar(tuple, field, origin + 100.0);
+        if (field.name == "y1") write_scalar(tuple, field, origin + 200.0);
+        if (field.name == "z1") write_scalar(tuple, field, origin + 300.0);
       }
     });
   } else if (table.name == "part_attr") {
@@ -1054,6 +1058,9 @@ void append_polygon_weld_table(std::vector<std::byte>& bytes,
             {static_cast<double>(polygon) * 20.0 + static_cast<double>(segment) * 10.0, 0.0, 0.0});
         path_values.push_back(frame_fixture == PolygonWeldFrameFixture::leg_parallel_to_tangent
                                   ? tekla::db1::Vector3d{1.0, 0.0, 0.0}
+                              : frame_fixture ==
+                                      PolygonWeldFrameFixture::leg_almost_parallel_to_tangent
+                                  ? tekla::db1::Vector3d{1.0, 1.0e-8, 0.0}
                               : frame_fixture == PolygonWeldFrameFixture::noisy_tangent_component
                                   ? tekla::db1::Vector3d{4.6e-5, 1.0, 0.0}
                               : frame_fixture == PolygonWeldFrameFixture::reversed_handedness
@@ -1937,6 +1944,43 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
         "a polygon-weld leg parallel to its segment tangent is rejected with an object diagnostic");
   }
 
+  const auto almost_parallel_leg_weld_bytes = database_with_polygon_weld_geometry(
+      false, false, PolygonWeldFrameFixture::leg_almost_parallel_to_tangent);
+  ModelPackage almost_parallel_leg_weld_package;
+  almost_parallel_leg_weld_package.add(Asset::copy(AssetRole::model_database,
+                                                   "almost-parallel-leg-polygon-weld.db1",
+                                                   almost_parallel_leg_weld_bytes));
+  auto almost_parallel_leg_weld_model = open(std::move(almost_parallel_leg_weld_package));
+  CHECK(almost_parallel_leg_weld_model.has_value(),
+        "an almost-parallel-leg polygon-weld database opens");
+  if (almost_parallel_leg_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = almost_parallel_leg_weld_model.value().process(request);
+    CHECK(processed.has_value(),
+          "almost-parallel-leg polygon-weld processing remains object-scoped");
+    bool emitted_mesh = false;
+    bool saw_invalid_geometry = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "almost-parallel-leg polygon-weld batches fail open");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          emitted_mesh = emitted_mesh || mesh.object_id == 1201U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_invalid_geometry =
+              saw_invalid_geometry ||
+              (diagnostic.object_id == 1201U && diagnostic.code == ErrorCode::invalid_geometry &&
+               diagnostic.message.find("polygon-weld") != std::string_view::npos);
+        }
+      }
+    }
+    CHECK(!emitted_mesh && saw_invalid_geometry,
+          "a polygon-weld leg within 1e-8 radians of its segment tangent is rejected");
+  }
+
   const auto reversed_frame_weld_bytes = database_with_polygon_weld_geometry(
       false, false, PolygonWeldFrameFixture::reversed_handedness);
   ModelPackage reversed_frame_weld_package;
@@ -2056,6 +2100,40 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     }
     CHECK(!emitted_mesh && saw_invalid_geometry,
           "a polygon-weld with a collinear model coordinate basis is rejected before meshing");
+  }
+
+  const auto large_origin_weld_bytes = database_with_polygon_weld_geometry(
+      false, false, PolygonWeldFrameFixture::large_model_origin);
+  ModelPackage large_origin_weld_package;
+  large_origin_weld_package.add(Asset::copy(
+      AssetRole::model_database, "large-origin-polygon-weld.db1", large_origin_weld_bytes));
+  auto large_origin_weld_model = open(std::move(large_origin_weld_package));
+  CHECK(large_origin_weld_model.has_value(), "a large-origin polygon-weld database opens");
+  if (large_origin_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = large_origin_weld_model.value().process(request);
+    CHECK(processed.has_value(), "large-origin polygon-weld processing remains object-scoped");
+    bool emitted_mesh = false;
+    bool saw_invalid_geometry = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "large-origin polygon-weld batches fail open");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          emitted_mesh = emitted_mesh || mesh.object_id == 1201U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_invalid_geometry =
+              saw_invalid_geometry ||
+              (diagnostic.object_id == 1201U && diagnostic.code == ErrorCode::invalid_geometry &&
+               diagnostic.message.find("polygon-weld") != std::string_view::npos);
+        }
+      }
+    }
+    CHECK(!emitted_mesh && saw_invalid_geometry,
+          "a polygon-weld whose 5mm and 10mm features collapse after float conversion is rejected");
   }
 
   const auto malformed_polygon_weld_bytes = database_with_polygon_weld_geometry(true);

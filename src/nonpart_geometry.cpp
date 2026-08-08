@@ -1186,11 +1186,16 @@ struct WeldFilletFrame {
   const auto tangent = normalized(subtract(end, start));
   if (!tangent) return std::nullopt;
   const auto project_leg = [&](Vector3d value) -> std::optional<Vector3d> {
+    // Persisted directions may carry small tangent noise, but a leg must still have at least a
+    // one-microradian angular separation from the path. This is above float-direction resolution
+    // while preserving the observed near-perpendicular frames after projection.
+    constexpr double minimum_sine_to_tangent = 1.0e-6;
     const double source_length = vector_length(value);
     if (!std::isfinite(source_length) || source_length <= 1.0e-12) return std::nullopt;
     const auto projected = subtract(value, scale(*tangent, dot(value, *tangent)));
     const double projected_length = vector_length(projected);
-    if (!std::isfinite(projected_length) || projected_length <= source_length * 1.0e-9) {
+    if (!std::isfinite(projected_length) ||
+        projected_length <= source_length * minimum_sine_to_tangent) {
       return std::nullopt;
     }
     return scale(projected, 1.0 / projected_length);
@@ -1222,7 +1227,13 @@ struct WeldFilletFrame {
         std::abs(model.z) > std::numeric_limits<float>::max()) {
       return std::nullopt;
     }
-    model_ring[index] = model;
+    // MeshData stores model positions as floats, so topology must be validated after the same
+    // quantization. Large model origins can otherwise collapse valid double-space features.
+    model_ring[index] = {
+        static_cast<double>(static_cast<float>(model.x)),
+        static_cast<double>(static_cast<float>(model.y)),
+        static_cast<double>(static_cast<float>(model.z)),
+    };
   }
   return model_ring;
 }
