@@ -3149,7 +3149,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
   }
 
   for (const auto& [profile, positions, indices, expected_bounds] :
-       std::array<std::tuple<std::string_view, std::size_t, std::size_t, std::array<float, 6>>, 34>{
+       std::array<std::tuple<std::string_view, std::size_t, std::size_t, std::array<float, 6>>, 36>{
            std::tuple{"IPE200", 168U, 324U,
                       std::array<float, 6>{10.0F, -80.0F, -20.0F, 1010.0F, 120.0F, 80.0F}},
            std::tuple{"HEA120", 168U, 324U,
@@ -3174,6 +3174,11 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
                       std::array<float, 6>{10.0F, -255.0F, -97.0F, 1010.0F, 295.0F, 157.0F}},
            std::tuple{"O50-2", 192U, 384U,
                       std::array<float, 6>{10.0F, -5.0F, 5.0F, 1010.0F, 45.0F, 55.0F}},
+           std::tuple{"O112*10", 240U, 480U,
+                      std::array<float, 6>{10.0F, -36.0F, -26.0F, 1010.0F, 76.0F, 86.0F}},
+           std::tuple{"SPD2135*16", 912U, 1824U,
+                      std::array<float, 6>{10.0F, -1047.5F, -1037.5F, 1010.0F, 1087.5F,
+                                           1097.5F}},
            std::tuple{"QR100*5", 48U, 96U,
                       std::array<float, 6>{10.0F, -30.0F, -20.0F, 1010.0F, 70.0F, 80.0F}},
            std::tuple{"RHS90*4", 48U, 96U,

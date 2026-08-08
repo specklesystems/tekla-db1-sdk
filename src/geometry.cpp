@@ -731,7 +731,7 @@ struct Contour {
                    .circular_inner_radius = values[0] / 2.0 - values[1]};
   }
   if (profile.starts_with("O")) {
-    const auto values = dimensions(std::string_view(profile).substr(1), "-");
+    const auto values = dimensions(std::string_view(profile).substr(1), "*Xx-");
     if (values.size() == 2U && values[0] > 2.0 * values[1]) {
       const auto segments = round_segment_count(values[0]);
       return Section{.kind = Section::Kind::hollow,
@@ -740,6 +740,16 @@ struct Contour {
                      .circular_outer_radius = values[0] / 2.0,
                      .circular_inner_radius = values[0] / 2.0 - values[1]};
     }
+  }
+  if (profile.starts_with("SPD")) {
+    const auto values = dimensions(std::string_view(profile).substr(3));
+    if (values.size() != 2U || values[0] <= 2.0 * values[1]) return std::nullopt;
+    const auto segments = round_segment_count(values[0]);
+    return Section{.kind = Section::Kind::hollow,
+                   .outer = circle(values[0], segments),
+                   .inner = circle(values[0] - 2.0 * values[1], segments),
+                   .circular_outer_radius = values[0] / 2.0,
+                   .circular_inner_radius = values[0] / 2.0 - values[1]};
   }
   if (profile.starts_with("PD")) {
     const auto values = dimensions(std::string_view(profile).substr(2));
