@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -79,6 +80,12 @@ void replace_ascii_once(std::vector<std::byte>& bytes, std::string_view from, st
   std::copy(replacement, replacement + to.size(), found);
 }
 
+enum class PartFrameFixture {
+  orthogonal,
+  skewed,
+  rotated,
+};
+
 void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schema& schema,
                   const tekla::db1::detail::TableSchema& table, bool final,
                   std::string_view profile = "200*10", std::string_view object_class = "14",
@@ -89,7 +96,8 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
                   bool zero_transverse_axis = false, bool duplicate_property_fixture = false,
                   bool report_fixture = false, bool zero_position_report_fixture = false,
                   bool bolt_fixture = false, bool legacy_bolt_fixture = false,
-                  bool assembly_fixture = false) {
+                  bool assembly_fixture = false,
+                  PartFrameFixture part_frame = PartFrameFixture::orthogonal) {
   constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
                                                std::byte{0xdb}};
   constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
@@ -561,9 +569,15 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
       append_u32(bytes, id + 100U);
       append_u32(bytes, id + 101U);
     };
-    append_axes(
-        901U, {1.0, 0.0, 0.0},
-        zero_transverse_axis ? tekla::db1::Vector3d{} : tekla::db1::Vector3d{0.0, 1.0, 0.0});
+    const auto x_axis = part_frame == PartFrameFixture::rotated
+                            ? tekla::db1::Vector3d{0.0, 1.0, 0.0}
+                            : tekla::db1::Vector3d{1.0, 0.0, 0.0};
+    const auto y_axis =
+        zero_transverse_axis                      ? tekla::db1::Vector3d{}
+        : part_frame == PartFrameFixture::skewed  ? tekla::db1::Vector3d{0.5, 1.0, 0.0}
+        : part_frame == PartFrameFixture::rotated ? tekla::db1::Vector3d{-1.0, 0.0, 0.0}
+                                                  : tekla::db1::Vector3d{0.0, 1.0, 0.0};
+    append_axes(901U, x_axis, y_axis);
     if (edge_chamfer) {
       constexpr double diagonal = 0.7071067811865476;
       append_axes(991U, {0.0, 0.0, -1.0}, {diagonal, diagonal, 0.0});
@@ -819,7 +833,8 @@ std::vector<std::byte> database_with_one_object(
     bool weld_fixture = false, bool zero_transverse_axis = false,
     bool duplicate_property_fixture = false, bool report_fixture = false,
     bool zero_position_report_fixture = false, bool bolt_fixture = false,
-    bool legacy_bolt_fixture = false, bool assembly_fixture = false) {
+    bool legacy_bolt_fixture = false, bool assembly_fixture = false,
+    PartFrameFixture part_frame = PartFrameFixture::orthogonal) {
   constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
                                                std::byte{0xdb}};
   const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
@@ -840,7 +855,7 @@ std::vector<std::byte> database_with_one_object(
                    edge_chamfer, arc_contour, component_fixture, keyed_tables, weld_fixture,
                    zero_transverse_axis, duplicate_property_fixture, report_fixture,
                    zero_position_report_fixture, bolt_fixture, legacy_bolt_fixture,
-                   assembly_fixture);
+                   assembly_fixture, part_frame);
     }
   }
   return bytes;
@@ -850,6 +865,18 @@ std::vector<std::byte> database_with_relationship_semantics(std::string_view for
   return database_with_one_object("200*10", "14", format, false, 7U, false, false, false, false,
                                   false, false, false, false, false, false, false, false, false,
                                   false, true);
+}
+
+std::vector<std::byte> database_with_skewed_part_frame() {
+  return database_with_one_object("200*10", "14", "9.66", false, 7U, false, false, false, false,
+                                  false, false, false, false, false, false, false, false, false,
+                                  false, false, PartFrameFixture::skewed);
+}
+
+std::vector<std::byte> database_with_rotated_part_frame() {
+  return database_with_one_object("200*10", "14", "9.66", false, 7U, false, false, false, false,
+                                  false, false, false, false, false, false, false, false, false,
+                                  false, false, PartFrameFixture::rotated);
 }
 
 std::vector<std::byte> database_with_report_semantics(std::string_view format) {
@@ -1388,10 +1415,41 @@ std::vector<std::uint64_t> display_signature(const tekla::db1::Model& model) {
   return signature;
 }
 
+bool reconstructs_model_mesh(const tekla::db1::MeshView& local_mesh,
+                             const tekla::db1::MeshView& model_mesh) {
+  if (local_mesh.positions.size() != model_mesh.positions.size() ||
+      local_mesh.indices.size() != model_mesh.indices.size() ||
+      !std::equal(local_mesh.indices.begin(), local_mesh.indices.end(), model_mesh.indices.begin(),
+                  model_mesh.indices.end())) {
+    return false;
+  }
+  for (std::size_t index = 0U; index + 2U < local_mesh.positions.size(); index += 3U) {
+    const auto& placement = local_mesh.placement;
+    const tekla::db1::Vector3d reconstructed{
+        placement.origin.x + placement.x_axis.x * local_mesh.positions[index] +
+            placement.y_axis.x * local_mesh.positions[index + 1U] +
+            placement.z_axis.x * local_mesh.positions[index + 2U],
+        placement.origin.y + placement.x_axis.y * local_mesh.positions[index] +
+            placement.y_axis.y * local_mesh.positions[index + 1U] +
+            placement.z_axis.y * local_mesh.positions[index + 2U],
+        placement.origin.z + placement.x_axis.z * local_mesh.positions[index] +
+            placement.y_axis.z * local_mesh.positions[index + 1U] +
+            placement.z_axis.z * local_mesh.positions[index + 2U]};
+    if (std::abs(reconstructed.x - model_mesh.positions[index]) >= 1.0e-6 ||
+        std::abs(reconstructed.y - model_mesh.positions[index + 1U]) >= 1.0e-6 ||
+        std::abs(reconstructed.z - model_mesh.positions[index + 2U]) >= 1.0e-6) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
   using namespace tekla::db1;
+  CHECK(ProcessRequest{}.mesh_coordinate_mode == MeshCoordinateMode::model_space,
+        "display meshes remain in model space unless local placement is requested");
   CHECK(object_role(ObjectKind::beam) == ObjectRole::model_element,
         "ordinary parts are independently publishable model elements");
   CHECK(object_role(ObjectKind::component) == ObjectRole::model_element,
@@ -2075,6 +2133,8 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
         } else if (batch.value().kind == BatchKind::meshes) {
           meshes += batch.value().meshes.size();
           CHECK(!batch.value().meshes.empty() &&
+                    batch.value().meshes.front().coordinate_space ==
+                        MeshCoordinateMode::model_space &&
                     batch.value().meshes.front().positions.size() == 24 &&
                     batch.value().meshes.front().indices.size() == 36 &&
                     batch.value().meshes.front().has_report_metrics &&
@@ -2094,6 +2154,51 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     CHECK(!first_signature.empty() && first_signature == second_signature,
           "repeated processing emits the same ordered display geometry");
 
+    ProcessRequest world_request;
+    world_request.stages = Stage::display_geometry;
+    auto world_processed = geometry_model.value().process(world_request);
+    ProcessRequest local_request;
+    local_request.stages = Stage::display_geometry;
+    local_request.mesh_coordinate_mode = MeshCoordinateMode::local_with_rigid_placement;
+    auto local_processed = geometry_model.value().process(local_request);
+    CHECK(world_processed.has_value() && local_processed.has_value(),
+          "world and placed-local display processing are both available");
+    if (world_processed && local_processed) {
+      auto world_batch = world_processed.value()->next();
+      auto local_batch = local_processed.value()->next();
+      CHECK(world_batch.has_value() && local_batch.has_value() &&
+                world_batch.value().kind == BatchKind::meshes &&
+                local_batch.value().kind == BatchKind::meshes &&
+                world_batch.value().meshes.size() == 1U && local_batch.value().meshes.size() == 1U,
+            "the analytic fixture emits matching world and placed-local mesh batches");
+      if (world_batch && local_batch && world_batch.value().kind == BatchKind::meshes &&
+          local_batch.value().kind == BatchKind::meshes &&
+          world_batch.value().meshes.size() == 1U && local_batch.value().meshes.size() == 1U) {
+        const auto& world_mesh = world_batch.value().meshes.front();
+        const auto& local_mesh = local_batch.value().meshes.front();
+        CHECK(local_mesh.coordinate_space == MeshCoordinateMode::local_with_rigid_placement &&
+                  local_mesh.placement.origin.x == 10.0 && local_mesh.placement.origin.y == 20.0 &&
+                  local_mesh.placement.origin.z == 30.0 && local_mesh.placement.x_axis.x == 1.0 &&
+                  local_mesh.placement.y_axis.y == 1.0 && local_mesh.placement.z_axis.z == 1.0,
+              "a requested local mesh carries its persisted rigid placement");
+        CHECK(reconstructs_model_mesh(local_mesh, world_mesh),
+              "the local placement reconstructs the unchanged world mesh and topology");
+        CHECK(local_mesh.has_report_metrics == world_mesh.has_report_metrics &&
+                  local_mesh.has_cover_surface_area == world_mesh.has_cover_surface_area &&
+                  local_mesh.has_section_extents == world_mesh.has_section_extents &&
+                  local_mesh.surface_area == world_mesh.surface_area &&
+                  local_mesh.cover_surface_area == world_mesh.cover_surface_area &&
+                  local_mesh.volume == world_mesh.volume &&
+                  local_mesh.longitudinal_min == world_mesh.longitudinal_min &&
+                  local_mesh.longitudinal_max == world_mesh.longitudinal_max &&
+                  local_mesh.section_y_min == world_mesh.section_y_min &&
+                  local_mesh.section_y_max == world_mesh.section_y_max &&
+                  local_mesh.section_z_min == world_mesh.section_z_min &&
+                  local_mesh.section_z_max == world_mesh.section_z_max,
+              "coordinate representation does not change double-precision report metrics");
+      }
+    }
+
     ProcessRequest excluded_request;
     excluded_request.stages = Stage::display_geometry;
     excluded_request.geometry_object_id_min = 1202;
@@ -2103,6 +2208,90 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
       auto batch = excluded.value()->next();
       CHECK(batch.has_value() && batch.value().kind == BatchKind::end,
             "geometry outside the requested internal-id window is skipped");
+    }
+  }
+
+  const auto rotated_frame_bytes = database_with_rotated_part_frame();
+  ModelPackage rotated_frame_package;
+  rotated_frame_package.add(
+      Asset::copy(AssetRole::model_database, "rotated-frame.db1", rotated_frame_bytes));
+  auto rotated_frame_model = open(std::move(rotated_frame_package));
+  CHECK(rotated_frame_model.has_value(), "the rotated-frame geometry fixture opens");
+  if (rotated_frame_model) {
+    ProcessRequest world_request;
+    world_request.stages = Stage::display_geometry;
+    auto world_processed = rotated_frame_model.value().process(world_request);
+    ProcessRequest local_request;
+    local_request.stages = Stage::display_geometry;
+    local_request.mesh_coordinate_mode = MeshCoordinateMode::local_with_rigid_placement;
+    auto local_processed = rotated_frame_model.value().process(local_request);
+    CHECK(world_processed.has_value() && local_processed.has_value(),
+          "a rotated frame can be processed in both coordinate modes");
+    if (world_processed && local_processed) {
+      auto world_batch = world_processed.value()->next();
+      auto local_batch = local_processed.value()->next();
+      CHECK(world_batch.has_value() && local_batch.has_value() &&
+                world_batch.value().kind == BatchKind::meshes &&
+                local_batch.value().kind == BatchKind::meshes &&
+                world_batch.value().meshes.size() == 1U && local_batch.value().meshes.size() == 1U,
+            "a rotated frame emits matching world and placed-local batches");
+      if (world_batch && local_batch && world_batch.value().kind == BatchKind::meshes &&
+          local_batch.value().kind == BatchKind::meshes &&
+          world_batch.value().meshes.size() == 1U && local_batch.value().meshes.size() == 1U) {
+        const auto& world_mesh = world_batch.value().meshes.front();
+        const auto& local_mesh = local_batch.value().meshes.front();
+        CHECK(local_mesh.coordinate_space == MeshCoordinateMode::local_with_rigid_placement &&
+                  local_mesh.placement.origin.x == 10.0 && local_mesh.placement.origin.y == 20.0 &&
+                  local_mesh.placement.origin.z == 30.0 && local_mesh.placement.x_axis.x == 0.0 &&
+                  local_mesh.placement.x_axis.y == 1.0 && local_mesh.placement.y_axis.x == -1.0 &&
+                  local_mesh.placement.y_axis.y == 0.0 && local_mesh.placement.z_axis.z == 1.0,
+              "a placed mesh publishes local-to-model basis vectors as matrix columns");
+        CHECK(reconstructs_model_mesh(local_mesh, world_mesh),
+              "column-oriented placement reconstructs rotated model geometry");
+      }
+    }
+  }
+
+  const auto skewed_frame_bytes = database_with_skewed_part_frame();
+  ModelPackage skewed_frame_package;
+  skewed_frame_package.add(
+      Asset::copy(AssetRole::model_database, "skewed-frame.db1", skewed_frame_bytes));
+  auto skewed_frame_model = open(std::move(skewed_frame_package));
+  CHECK(skewed_frame_model.has_value(), "the skewed-frame geometry fixture opens");
+  if (skewed_frame_model) {
+    ProcessRequest world_request;
+    world_request.stages = Stage::display_geometry;
+    auto world_processed = skewed_frame_model.value().process(world_request);
+    ProcessRequest local_request;
+    local_request.stages = Stage::display_geometry;
+    local_request.mesh_coordinate_mode = MeshCoordinateMode::local_with_rigid_placement;
+    auto local_processed = skewed_frame_model.value().process(local_request);
+    CHECK(world_processed.has_value() && local_processed.has_value(),
+          "a skewed frame can be processed in both coordinate modes");
+    if (world_processed && local_processed) {
+      auto world_batch = world_processed.value()->next();
+      auto local_batch = local_processed.value()->next();
+      CHECK(world_batch.has_value() && local_batch.has_value() &&
+                world_batch.value().kind == BatchKind::meshes &&
+                local_batch.value().kind == BatchKind::meshes &&
+                world_batch.value().meshes.size() == 1U && local_batch.value().meshes.size() == 1U,
+            "a skewed frame still emits one mesh in either requested mode");
+      if (world_batch && local_batch && world_batch.value().kind == BatchKind::meshes &&
+          local_batch.value().kind == BatchKind::meshes &&
+          world_batch.value().meshes.size() == 1U && local_batch.value().meshes.size() == 1U) {
+        const auto& world_mesh = world_batch.value().meshes.front();
+        const auto& local_mesh = local_batch.value().meshes.front();
+        CHECK(local_mesh.coordinate_space == MeshCoordinateMode::model_space &&
+                  local_mesh.placement.origin.x == 0.0 && local_mesh.placement.origin.y == 0.0 &&
+                  local_mesh.placement.origin.z == 0.0 && local_mesh.placement.x_axis.x == 1.0 &&
+                  local_mesh.placement.y_axis.y == 1.0 && local_mesh.placement.z_axis.z == 1.0 &&
+                  std::equal(local_mesh.positions.begin(), local_mesh.positions.end(),
+                             world_mesh.positions.begin(), world_mesh.positions.end()),
+              "an untrustworthy frame falls back for that mesh to unchanged model coordinates");
+        CHECK(local_mesh.surface_area == world_mesh.surface_area &&
+                  local_mesh.volume == world_mesh.volume,
+              "a per-mesh placement fallback preserves report metrics");
+      }
     }
   }
 

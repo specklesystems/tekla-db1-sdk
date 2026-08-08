@@ -74,6 +74,7 @@ add_library(tekla_db1_core STATIC
   src/geometry.cpp
   src/identity.cpp
   src/mapped_file.cpp
+  src/mesh_placement.cpp
   src/model.cpp
   src/nonpart_geometry.cpp
   src/package.cpp

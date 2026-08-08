@@ -1,6 +1,7 @@
 #include "geometry.hpp"
 
 #include "geometry_recipe.hpp"
+#include "mesh_placement.hpp"
 #include "profile.hpp"
 #include "record.hpp"
 #include "shape.hpp"
@@ -80,6 +81,7 @@ struct MeshData {
   // conversion happens only after every persisted operation has been replayed.
   std::vector<double> positions;
   std::vector<std::uint32_t> indices;
+  std::optional<RigidPlacementView> placement;
   std::optional<RuledSweepRecipe> ruled_sweep_recipe;
   Vector3d longitudinal_axis{1.0, 0.0, 0.0};
   Vector3d section_origin;
@@ -2011,8 +2013,9 @@ class GeometryReader final : public BatchReader {
                  LocalProfileCatalog profiles, ShapeCatalog shapes,
                  std::array<std::uint32_t, 9> offsets, bool emit_definitions, bool emit_meshes,
                  std::size_t batch_size, TopologyMode topology_mode,
-                 std::string topology_worker_path, std::uint32_t topology_timeout_milliseconds,
-                 std::uint64_t object_id_min, std::uint64_t object_id_max)
+                 MeshCoordinateMode mesh_coordinate_mode, std::string topology_worker_path,
+                 std::uint32_t topology_timeout_milliseconds, std::uint64_t object_id_min,
+                 std::uint64_t object_id_max)
       : storage_(std::move(storage)),
         parts_(&parts),
         part_schema_(&part_schema),
@@ -2034,6 +2037,7 @@ class GeometryReader final : public BatchReader {
         emit_meshes_(emit_meshes),
         batch_size_(batch_size),
         topology_mode_(topology_mode),
+        mesh_coordinate_mode_(mesh_coordinate_mode),
         object_id_min_(object_id_min),
         object_id_max_(object_id_max) {
 #if defined(TEKLA_DB1_HAS_OCCT)
@@ -2296,17 +2300,19 @@ class GeometryReader final : public BatchReader {
         if (mesh_data_.size() != mesh_count_before) {
           apply_operations(object_id, mesh_data_.back());
           mesh_data_.back().longitudinal_axis = definition.x_axis;
+          mesh_data_.back().placement = RigidPlacementView{definition.origin, definition.x_axis,
+                                                           definition.y_axis, definition.z_axis};
         }
       }
       ++count;
     }
     for (const auto& mesh : mesh_data_) {
-      auto& positions = mesh_positions_.emplace_back();
-      positions.reserve(mesh.positions.size());
-      for (const auto value : mesh.positions) {
-        positions.push_back(static_cast<float>(value));
-      }
       const auto metrics = report_metrics(mesh, mesh.longitudinal_axis);
+      auto projected =
+          project_mesh_positions(mesh.positions, mesh_coordinate_mode_, mesh.placement);
+      const auto coordinate_space = projected.coordinate_space;
+      const auto placement = projected.placement;
+      auto& positions = mesh_positions_.emplace_back(std::move(projected.positions));
       meshes_.push_back(
           MeshView{.object_id = mesh.object_id,
                    .positions = positions,
@@ -2322,7 +2328,9 @@ class GeometryReader final : public BatchReader {
                    .section_z_max = metrics.section_z_max,
                    .has_report_metrics = metrics.valid,
                    .has_cover_surface_area = metrics.valid && metrics.has_cover_surface_area,
-                   .has_section_extents = metrics.valid && metrics.has_section_extents});
+                   .has_section_extents = metrics.valid && metrics.has_section_extents,
+                   .coordinate_space = coordinate_space,
+                   .placement = placement});
     }
     if (emit_definitions_ && !definitions_.empty())
       return Result<BatchView>::success(
@@ -4362,6 +4370,7 @@ class GeometryReader final : public BatchReader {
   bool emit_meshes_ = false;
   std::size_t batch_size_ = 0;
   TopologyMode topology_mode_ = TopologyMode::disabled;
+  MeshCoordinateMode mesh_coordinate_mode_ = MeshCoordinateMode::model_space;
   std::uint64_t object_id_min_ = 0;
   std::uint64_t object_id_max_ = std::numeric_limits<std::uint64_t>::max();
 #if defined(TEKLA_DB1_HAS_OCCT)
@@ -4795,9 +4804,9 @@ Result<ProcessStream> make_geometry_stream(std::shared_ptr<const ModelStorage> s
           ? 256U
           : static_cast<std::size_t>(
                 std::clamp<std::uint64_t>(request.batch_memory_budget_bytes / 32768U, 1, 4096)),
-      request.topology_mode, std::string(request.topology_worker_path),
-      request.topology_timeout_milliseconds, request.geometry_object_id_min,
-      request.geometry_object_id_max));
+      request.topology_mode, request.mesh_coordinate_mode,
+      std::string(request.topology_worker_path), request.topology_timeout_milliseconds,
+      request.geometry_object_id_min, request.geometry_object_id_max));
 }
 
 }  // namespace tekla::db1::detail

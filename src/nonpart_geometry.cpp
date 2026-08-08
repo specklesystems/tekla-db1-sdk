@@ -1146,7 +1146,8 @@ class NonPartReader final : public BatchReader {
       meshes_.reserve(count);
       for (std::size_t index = 0; index < count; ++index) {
         const auto& mesh = mesh_data_[mesh_index_ + index];
-        meshes_.push_back({mesh.object_id, mesh.positions, mesh.indices});
+        meshes_.push_back(MeshView{
+            .object_id = mesh.object_id, .positions = mesh.positions, .indices = mesh.indices});
       }
       mesh_index_ += count;
       return Result<BatchView>::success(BatchView{.kind = BatchKind::meshes, .meshes = meshes_});

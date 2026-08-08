@@ -8,6 +8,9 @@ compatibility policy in the support matrix.
 
 ### Added
 
+- Opt-in placed display meshes expose object-local float coordinates with a
+  per-mesh rigid placement while preserving model-space output as the default
+  and falling back independently for non-rigid persisted frames.
 - `ObjectRole`, `object_role`, and `is_model_element` distinguish independently
   publishable model elements from Boolean-part and cut-plane evaluation
   features while retaining all persisted identities for raw processing.
