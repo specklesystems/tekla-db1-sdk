@@ -2298,7 +2298,7 @@ class GeometryReader final : public BatchReader {
                "The profile section is not available to the analytic evaluator."});
         }
         if (mesh_data_.size() != mesh_count_before) {
-          apply_operations(object_id, mesh_data_.back());
+          apply_operations(object_id, mesh_data_.back(), definition);
           mesh_data_.back().longitudinal_axis = definition.x_axis;
           mesh_data_.back().placement = RigidPlacementView{definition.origin, definition.x_axis,
                                                            definition.y_axis, definition.z_axis};
@@ -3944,6 +3944,7 @@ class GeometryReader final : public BatchReader {
   }
 
   [[nodiscard]] Result<bool> evaluate_operations_csg(std::uint32_t object_id, MeshData& mesh,
+                                                     const DefinitionGeometryView& definition,
                                                      OperationGraphState& graph) {
     const auto found = operations_.find(object_id);
     if (found == operations_.end() || found->second.empty()) return Result<bool>::success(false);
@@ -3962,16 +3963,23 @@ class GeometryReader final : public BatchReader {
       }
       return Result<OcctRequest>::success(std::move(request));
     };
+    const GeometryEvaluationPlacement placement{
+        .origin = {definition.origin.x, definition.origin.y, definition.origin.z},
+        .x_axis = {definition.x_axis.x, definition.x_axis.y, definition.x_axis.z},
+        .y_axis = {definition.y_axis.x, definition.y_axis.y, definition.y_axis.z},
+        .z_axis = {definition.z_axis.x, definition.z_axis.y, definition.z_axis.z},
+    };
     const auto evaluate_request = [&](const OcctRequest& request) {
-      return geometry_evaluation_cache_.evaluate(request, [&](const OcctRequest& uncached) {
-        return topology_mode_ == TopologyMode::supervised
-                   ? supervised_host_ != nullptr
-                         ? supervised_host_->evaluate(uncached)
-                         : Result<OcctMesh>::failure(
-                               {ErrorCode::invalid_argument,
-                                "A supervised topology worker path was not supplied."})
-                   : direct_host_.evaluate(uncached);
-      });
+      return geometry_evaluation_cache_.evaluate(
+          request, placement, [&](const OcctRequest& uncached) {
+            return topology_mode_ == TopologyMode::supervised
+                       ? supervised_host_ != nullptr
+                             ? supervised_host_->evaluate(uncached)
+                             : Result<OcctMesh>::failure(
+                                   {ErrorCode::invalid_argument,
+                                    "A supervised topology worker path was not supplied."})
+                       : direct_host_.evaluate(uncached);
+          });
     };
 
     auto request = build_request(graph, false);
@@ -4257,7 +4265,8 @@ class GeometryReader final : public BatchReader {
   }
 #endif
 
-  void apply_operations(std::uint32_t object_id, MeshData& mesh) {
+  void apply_operations(std::uint32_t object_id, MeshData& mesh,
+                        const DefinitionGeometryView& definition) {
     const auto found = operations_.find(object_id);
     if (found == operations_.end() || found->second.empty()) return;
     if (topology_mode_ == TopologyMode::disabled) {
@@ -4268,11 +4277,12 @@ class GeometryReader final : public BatchReader {
     }
 #if !defined(TEKLA_DB1_HAS_OCCT)
     (void)mesh;
+    (void)definition;
     diagnostics_.push_back({ErrorCode::decoder_unavailable, object_id,
                             "This build does not contain the optional topology evaluator."});
 #else
     OperationGraphState graph;
-    auto evaluated = evaluate_operations_csg(object_id, mesh, graph);
+    auto evaluated = evaluate_operations_csg(object_id, mesh, definition, graph);
     if (!evaluated) {
       add_diagnostic(evaluated.error().code, object_id, std::move(evaluated.error().message));
     }
