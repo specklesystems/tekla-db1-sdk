@@ -202,6 +202,7 @@ enum class ObjectKind {
   rebar_group,
   rebar_mesh,
   assembly,
+  surface_treatment,
 };
 
 // A persisted object can either be an independently meaningful model element

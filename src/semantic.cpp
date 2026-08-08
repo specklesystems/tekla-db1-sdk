@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -17,8 +18,8 @@
 #include <utility>
 #include <vector>
 
-#include "record.hpp"
 #include "identity.hpp"
+#include "record.hpp"
 #include "role_schema.hpp"
 #include "weld_semantics.hpp"
 
@@ -580,7 +581,8 @@ class SemanticRelationReader final : public BatchReader {
       const auto source = read_u32(tuple, relation_offsets_[2]);
       const auto target = read_u32(tuple, relation_offsets_[3]);
       const auto relation_id = read_u32(tuple, relation_offsets_[0]);
-      if (relation_type == 7U || relation_type == 11U || relation_type == 12U) {
+      if (relation_type == 7U || relation_type == 11U || relation_type == 12U ||
+          relation_type == 73U) {
         append_subelement(source, target, SemanticRelationOrigin::stored_relation, relation_id);
       } else if (relation_type == 47U) {
         append_hosted_on(target, source, relation_id);
@@ -1283,6 +1285,120 @@ class BoltSemanticReader final : public BatchReader {
   std::vector<PropertyView> properties_;
 };
 
+struct SurfaceTreatmentAttributeData {
+  std::string_view name;
+  std::string_view material;
+  std::string_view finish;
+  std::string_view object_class;
+  double thickness = 0.0;
+  std::uint32_t type = 0U;
+  std::uint32_t father_cuts = 0U;
+};
+
+class SurfaceTreatmentSemanticReader final : public BatchReader {
+ public:
+  SurfaceTreatmentSemanticReader(
+      std::shared_ptr<const ModelStorage> storage, const TableLayout& surfaces,
+      const TableSchema& surface_schema, std::uint32_t id_offset, std::uint32_t attribute_id_offset,
+      std::unordered_map<std::uint32_t, SurfaceTreatmentAttributeData> attributes,
+      std::size_t surface_batch_size)
+      : storage_(std::move(storage)),
+        surfaces_(&surfaces),
+        surface_schema_(&surface_schema),
+        id_offset_(id_offset),
+        attribute_id_offset_(attribute_id_offset),
+        attributes_(std::move(attributes)),
+        surface_batch_size_(surface_batch_size) {
+    properties_.reserve(surface_batch_size_ * 7U);
+    materials_.reserve(surface_batch_size_);
+  }
+
+  Result<BatchView> next() override {
+    if (emit_materials_) {
+      emit_materials_ = false;
+      return Result<BatchView>::success(
+          BatchView{.kind = BatchKind::materials, .materials = materials_});
+    }
+    if (row_ >= surfaces_->info.row_count)
+      return Result<BatchView>::success(BatchView{.kind = BatchKind::end});
+    properties_.clear();
+    materials_.clear();
+    const auto payload = storage_->payload.bytes();
+    std::size_t surface_count = 0U;
+    while (row_ < surfaces_->info.row_count && surface_count < surface_batch_size_) {
+      const auto record = surfaces_->record(payload, row_++);
+      if (record.empty()) {
+        return Result<BatchView>::failure(
+            {ErrorCode::invalid_container, "A surface-treatment record lies outside the payload."});
+      }
+      if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+      const auto tuple = record.subspan(1U, surface_schema_->tuple_size);
+      const auto attribute = attributes_.find(read_u32(tuple, attribute_id_offset_));
+      if (attribute == attributes_.end()) continue;
+      const auto object_id = read_u32(tuple, id_offset_);
+      const auto add_text = [&](std::string_view name, std::string_view value) {
+        if (!value.empty()) {
+          properties_.push_back(PropertyView{.object_id = object_id,
+                                             .group = "Tekla",
+                                             .name = name,
+                                             .kind = PropertyValueKind::text,
+                                             .text_value = value});
+        }
+      };
+      add_text("name", attribute->second.name);
+      add_text("material", attribute->second.material);
+      add_text("finish", attribute->second.finish);
+      add_text("class", attribute->second.object_class);
+      properties_.push_back(PropertyView{.object_id = object_id,
+                                         .group = "Tekla",
+                                         .name = "surfaceType",
+                                         .kind = PropertyValueKind::integer,
+                                         .integer_value = attribute->second.type});
+      if (std::isfinite(attribute->second.thickness) && attribute->second.thickness > 0.0) {
+        properties_.push_back(PropertyView{.object_id = object_id,
+                                           .group = "Tekla",
+                                           .name = "thickness",
+                                           .kind = PropertyValueKind::floating,
+                                           .floating_value = attribute->second.thickness});
+      }
+      properties_.push_back(PropertyView{.object_id = object_id,
+                                         .group = "Tekla",
+                                         .name = "cutByFatherBooleans",
+                                         .kind = PropertyValueKind::integer,
+                                         .integer_value = attribute->second.father_cuts});
+      materials_.push_back(MaterialView{.object_id = object_id,
+                                        .name = attribute->second.material,
+                                        .finish = attribute->second.finish,
+                                        .object_class = attribute->second.object_class});
+      ++surface_count;
+    }
+    emit_materials_ = !materials_.empty();
+    if (properties_.empty()) {
+      if (emit_materials_) {
+        emit_materials_ = false;
+        return Result<BatchView>::success(
+            BatchView{.kind = BatchKind::materials, .materials = materials_});
+      }
+      return next();
+    }
+    return Result<BatchView>::success(
+        BatchView{.kind = BatchKind::properties, .properties = properties_});
+  }
+
+ private:
+  std::shared_ptr<const ModelStorage> storage_;
+  const TableLayout* surfaces_ = nullptr;
+  const TableSchema* surface_schema_ = nullptr;
+  std::uint32_t id_offset_ = 0U;
+  std::uint32_t attribute_id_offset_ = 0U;
+  std::unordered_map<std::uint32_t, SurfaceTreatmentAttributeData> attributes_;
+  std::size_t surface_batch_size_ = 0U;
+  std::uint64_t row_ = 0U;
+  bool emit_materials_ = false;
+  std::vector<PropertyView> properties_;
+  std::vector<MaterialView> materials_;
+};
+
 class RebarSemanticReader final : public BatchReader {
  public:
   RebarSemanticReader(std::shared_ptr<const ModelStorage> storage, const TableLayout& rebars,
@@ -1478,6 +1594,69 @@ class RebarSemanticReader final : public BatchReader {
       storage, storage->layout.tables[bolts->ordinal], *bolts, id->offset,
       attribute_id->offset, polygon_id->offset, std::move(attributes), std::move(polygon_counts),
       batch_size_for(request, 384)));
+}
+
+[[nodiscard]] Result<ProcessStream> make_surface_treatment_semantic_stream(
+    std::shared_ptr<const ModelStorage> storage, const Schema& schema,
+    const ProcessRequest& request) {
+  const auto* surfaces = schema.find_table("surfacing");
+  const auto* attributes = schema.find_table("surfacing_attr");
+  if (surfaces == nullptr || attributes == nullptr ||
+      surfaces->ordinal >= storage->layout.tables.size() ||
+      attributes->ordinal >= storage->layout.tables.size()) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The surface-treatment tables are unavailable."});
+  }
+  const auto* id = find_field(schema, *surfaces, "id");
+  const auto* attribute_id = find_field(schema, *surfaces, "attr_id");
+  const auto* attribute_key = find_field(schema, *attributes, "id");
+  const auto* name = find_field(schema, *attributes, "ben");
+  const auto* material = find_field(schema, *attributes, "mat");
+  const auto* finish = find_field(schema, *attributes, "finish");
+  const auto* object_class = find_field(schema, *attributes, "ryhma");
+  const auto* geometry = find_field(schema, *attributes, "Geometry");
+  const auto* type = find_field(schema, *attributes, "surfacing_type");
+  const auto* father_cuts = find_field(schema, *attributes, "father_cuts");
+  if (id == nullptr || attribute_id == nullptr || attribute_key == nullptr || name == nullptr ||
+      material == nullptr || finish == nullptr || object_class == nullptr || geometry == nullptr ||
+      type == nullptr || father_cuts == nullptr) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The surface-treatment semantic layout is incomplete."});
+  }
+  std::unordered_map<std::uint32_t, SurfaceTreatmentAttributeData> decoded;
+  const auto& layout = storage->layout.tables[attributes->ordinal];
+  decoded.reserve(static_cast<std::size_t>(layout.info.row_count));
+  for (std::uint64_t row = 0U; row < layout.info.row_count; ++row) {
+    const auto record = layout.record(storage->payload.bytes(), row);
+    if (record.empty()) {
+      return Result<ProcessStream>::failure(
+          {ErrorCode::invalid_container,
+           "A surface-treatment attribute lies outside the payload."});
+    }
+    if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+    const auto tuple = record.subspan(1U, attributes->tuple_size);
+    const auto thickness_text = read_text(tuple, geometry->offset, geometry->size);
+    double thickness = 0.0;
+    const auto parsed = std::from_chars(thickness_text.data(),
+                                        thickness_text.data() + thickness_text.size(), thickness);
+    if (parsed.ec != std::errc{} || parsed.ptr != thickness_text.data() + thickness_text.size()) {
+      thickness = 0.0;
+    }
+    decoded.insert_or_assign(
+        read_u32(tuple, attribute_key->offset),
+        SurfaceTreatmentAttributeData{
+            .name = read_text(tuple, name->offset, name->size),
+            .material = read_text(tuple, material->offset, material->size),
+            .finish = read_text(tuple, finish->offset, finish->size),
+            .object_class = read_text(tuple, object_class->offset, object_class->size),
+            .thickness = thickness,
+            .type = read_u32(tuple, type->offset),
+            .father_cuts = read_u32(tuple, father_cuts->offset),
+        });
+  }
+  return Result<ProcessStream>::success(std::make_unique<SurfaceTreatmentSemanticReader>(
+      storage, storage->layout.tables[surfaces->ordinal], *surfaces, id->offset,
+      attribute_id->offset, std::move(decoded), batch_size_for(request, 512U)));
 }
 
 class ChainedReader final : public BatchReader {
@@ -1815,6 +1994,13 @@ Result<ProcessStream> make_property_stream(std::shared_ptr<const ModelStorage> s
     auto welds = make_weld_semantic_stream(storage, schema, request);
     if (!welds) return Result<ProcessStream>::failure(welds.error());
     streams.push_back(std::move(welds.value()));
+  }
+  const auto* surface_schema = schema.find_table("surfacing");
+  if (surface_schema != nullptr && surface_schema->ordinal < storage->layout.tables.size() &&
+      storage->layout.tables[surface_schema->ordinal].info.row_count != 0U) {
+    auto surfaces = make_surface_treatment_semantic_stream(storage, schema, request);
+    if (!surfaces) return Result<ProcessStream>::failure(surfaces.error());
+    streams.push_back(std::move(surfaces.value()));
   }
   return Result<ProcessStream>::success(std::make_unique<ChainedReader>(std::move(streams)));
 }

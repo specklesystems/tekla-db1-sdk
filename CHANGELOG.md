@@ -8,6 +8,10 @@ compatibility policy in the support matrix.
 
 ### Added
 
+- Persisted type-73 tile surface treatments expose stable identities, native
+  name/thickness/material semantics, father-part relationships, and closed
+  treatment solids from their stored polygon, placement, and numeric thickness.
+  Opt-in placed meshes keep repeated treatment contours reusable.
 - Opt-in placed display meshes expose object-local float coordinates with a
   per-mesh rigid placement while preserving model-space output as the default
   and falling back independently for non-rigid persisted frames.

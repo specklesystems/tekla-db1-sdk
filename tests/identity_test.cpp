@@ -1144,6 +1144,182 @@ std::vector<std::byte> database_with_polygon_weld_geometry(
   return bytes;
 }
 
+void append_surface_treatment_table(std::vector<std::byte>& bytes,
+                                    const tekla::db1::detail::Schema& schema,
+                                    const tekla::db1::detail::TableSchema& table, bool final) {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
+                                                  std::byte{0x00}};
+  append_u32(bytes, table.tuple_size);
+  append_u32(bytes, table.descriptor_count);
+  for (const auto descriptor : schema.table_descriptors(table)) append_u32(bytes, descriptor);
+
+  std::uint32_t row_number = 0U;
+  const auto append_tuple = [&](const auto& write) {
+    bytes.push_back(std::byte{0});
+    const auto tuple_offset = bytes.size();
+    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+    write(tuple);
+    append_u32(bytes, 30'000U + row_number);
+    append_u32(bytes, 40'000U + row_number);
+    ++row_number;
+  };
+  const auto write_scalar = [](std::span<std::byte> tuple,
+                               const tekla::db1::detail::FieldSchema& field, double value) {
+    if (field.type == tekla::db1::detail::FieldType::f32) {
+      write_u32(tuple, field.offset, std::bit_cast<std::uint32_t>(static_cast<float>(value)));
+    } else {
+      write_f64(tuple, field.offset, value);
+    }
+  };
+
+  if (table.name == "object") {
+    const auto append_object = [&](std::uint32_t id, std::uint32_t type, std::uint32_t subtype,
+                                   std::uint8_t guid_seed) {
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "type") write_u32(tuple, field.offset, type);
+          if (field.name == "subtype") write_u32(tuple, field.offset, subtype);
+          if (field.name == "guid") {
+            for (std::size_t index = 0; index < field.size; ++index) {
+              tuple[field.offset + index] =
+                  static_cast<std::byte>(guid_seed + static_cast<std::uint8_t>(index));
+            }
+          }
+        }
+      });
+    };
+    append_object(1201U, 3U, 0U, 0x20U);
+    append_object(1301U, 73U, 3U, 0x60U);
+  } else if (table.name == "coordsys_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 901U);
+        if (field.name == "xdir_y" || field.name == "ydir_x") write_scalar(tuple, field, 1.0);
+      }
+    });
+  } else if (table.name == "coordsys") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1201U);
+        if (field.name == "csys_attr_id") write_u32(tuple, field.offset, 901U);
+        if (field.name == "z1") write_scalar(tuple, field, -15.0);
+        if (field.name == "length") write_scalar(tuple, field, 1010.0);
+      }
+    });
+  } else if (table.name == "part_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 999U);
+        if (field.name == "prof") write_fixed(tuple, field.offset, field.size, "200*10");
+      }
+    });
+  } else if (table.name == "point") {
+    const auto append_point = [&](std::uint32_t id, double x) {
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "x") write_scalar(tuple, field, x);
+        }
+      });
+    };
+    append_point(920U, 0.0);
+    append_point(921U, 250.0);
+  } else if (table.name == "positioning") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 905U);
+        if (field.name == "PositionAtDepth") write_u32(tuple, field.offset, 2U);
+      }
+    });
+  } else if (table.name == "surfacing") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1301U);
+        if (field.name == "attr_id") write_u32(tuple, field.offset, 903U);
+        if (field.name == "PositioningAttrId") write_u32(tuple, field.offset, 905U);
+        if (field.name == "p1") write_u32(tuple, field.offset, 920U);
+        if (field.name == "p2") write_u32(tuple, field.offset, 921U);
+        if (field.name == "polygon_id") write_u32(tuple, field.offset, 950U);
+      }
+    });
+  } else if (table.name == "surfacing_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 903U);
+        if (field.name == "npoints") write_u32(tuple, field.offset, 4U);
+        if (field.name == "ryhma") write_fixed(tuple, field.offset, field.size, "0");
+        if (field.name == "ben") write_fixed(tuple, field.offset, field.size, "SURFACE-GRATING");
+        if (field.name == "Geometry") write_fixed(tuple, field.offset, field.size, "1.000000");
+        if (field.name == "mat") write_fixed(tuple, field.offset, field.size, "Zero_Density");
+        if (field.name == "finish") write_fixed(tuple, field.offset, field.size, "TS8 - Open-Mesh");
+        if (field.name == "surfacing_type") write_u32(tuple, field.offset, 3U);
+        if (field.name == "father_cuts") write_u32(tuple, field.offset, 1U);
+      }
+    });
+  } else if (table.name == "partpolygon") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      constexpr std::array<double, 4> x{0.0, 250.0, 250.0, 0.0};
+      constexpr std::array<double, 4> y{0.0, 0.0, 1010.0, 1010.0};
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 950U);
+        if (field.name == "hash_id") write_u32(tuple, field.offset, 951U);
+        for (std::size_t index = 0U; index < 10U; ++index) {
+          const auto suffix = std::to_string(index + 1U);
+          if (index < x.size() && field.name == "x" + suffix) write_scalar(tuple, field, x[index]);
+          if (index < y.size() && field.name == "y" + suffix) write_scalar(tuple, field, y[index]);
+          if (field.name == "types" + suffix) {
+            write_u32(tuple, field.offset, index < x.size() ? 0U : 2'147'483'647U);
+          }
+        }
+      }
+    });
+  } else if (table.name == "relation") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 960U);
+        if (field.name == "type") write_u32(tuple, field.offset, 73U);
+        if (field.name == "id1") write_u32(tuple, field.offset, 1201U);
+        if (field.name == "id2") write_u32(tuple, field.offset, 1301U);
+      }
+    });
+  }
+
+  bytes.push_back(std::byte{0});
+  if (final) {
+    bytes.insert(bytes.end(), final_footer.begin(), final_footer.end());
+  } else {
+    bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  }
+}
+
+std::vector<std::byte> database_with_surface_treatment() {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::string_view format = "9.66";
+  const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
+  CHECK(schema != nullptr, "the surface-treatment fixture schema is registered");
+  std::vector<std::byte> bytes;
+  append_ascii(bytes, "Xsteel");
+  bytes.push_back(std::byte{0x85});
+  bytes.push_back(std::byte{' '});
+  bytes.insert(bytes.end(), reinterpret_cast<const std::byte*>(format.data()),
+               reinterpret_cast<const std::byte*>(format.data() + format.size()));
+  append_ascii(bytes, " 7d72d8c9-0250-4f3a-8760-bcef517f016e");
+  append_u32(bytes, 1U);
+  bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  if (schema != nullptr) {
+    for (std::size_t index = 0U; index < schema->tables.size(); ++index) {
+      append_surface_treatment_table(bytes, *schema, schema->tables[index],
+                                     index + 1U == schema->tables.size());
+    }
+  }
+  return bytes;
+}
+
 std::vector<std::byte> database_with_relationship_semantics(std::string_view format) {
   return database_with_one_object("200*10", "14", format, false, 7U, false, false, false, false,
                                   false, false, false, false, false, false, false, false, false,
@@ -1926,6 +2102,128 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
           "a persisted fillet path becomes a bounded triangular mesh on the weld object");
     CHECK(!saw_polygon_record_mesh,
           "polygon storage IDs remain internal and do not become display owners");
+  }
+
+  const auto surface_treatment_bytes = database_with_surface_treatment();
+  ModelPackage surface_treatment_package;
+  surface_treatment_package.add(
+      Asset::copy(AssetRole::model_database, "surface-treatment.db1", surface_treatment_bytes));
+  auto surface_treatment_model = open(std::move(surface_treatment_package));
+  CHECK(surface_treatment_model.has_value(), "a persisted surface-treatment database opens");
+  if (surface_treatment_model) {
+    ProcessRequest request;
+    request.stages =
+        Stage::identities | Stage::properties | Stage::semantic_relations | Stage::display_geometry;
+    auto processed = surface_treatment_model.value().process(request);
+    CHECK(processed.has_value(), "surface-treatment processing is available");
+    if (!processed)
+      std::printf("surface-treatment process error: %s\n", processed.error().message.c_str());
+    bool saw_identity = false;
+    bool saw_name = false;
+    bool saw_thickness = false;
+    bool saw_material = false;
+    bool saw_father = false;
+    bool saw_mesh = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "surface-treatment batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& object : batch.value().objects) {
+          saw_identity |=
+              object.internal_id == 1301U && object.kind == ObjectKind::surface_treatment;
+        }
+        for (const auto& property : batch.value().properties) {
+          saw_name |= property.object_id == 1301U && property.name == "name" &&
+                      property.text_value == "SURFACE-GRATING";
+          saw_thickness |= property.object_id == 1301U && property.name == "thickness" &&
+                           property.kind == PropertyValueKind::floating &&
+                           property.floating_value == 1.0;
+        }
+        for (const auto& material : batch.value().materials) {
+          saw_material |= material.object_id == 1301U && material.name == "Zero_Density" &&
+                          material.finish == "TS8 - Open-Mesh";
+        }
+        for (const auto& relation : batch.value().semantic_relations) {
+          saw_father |= relation.kind == SemanticRelationKind::subelement &&
+                        relation.source_id == 1201U && relation.target_id == 1301U &&
+                        relation.source_relation_id == 960U;
+        }
+        for (const auto& mesh : batch.value().meshes) {
+          if (mesh.object_id != 1301U || mesh.positions.empty()) continue;
+          std::array<float, 6> bounds{mesh.positions[0], mesh.positions[1], mesh.positions[2],
+                                      mesh.positions[0], mesh.positions[1], mesh.positions[2]};
+          for (std::size_t index = 3U; index < mesh.positions.size(); index += 3U) {
+            for (std::size_t axis = 0U; axis < 3U; ++axis) {
+              bounds[axis] = std::min(bounds[axis], mesh.positions[index + axis]);
+              bounds[axis + 3U] = std::max(bounds[axis + 3U], mesh.positions[index + axis]);
+            }
+          }
+          const bool indices_valid =
+              mesh.indices.size() == 36U &&
+              std::all_of(mesh.indices.begin(), mesh.indices.end(),
+                          [&](std::uint32_t index) { return index < mesh.positions.size() / 3U; });
+          double signed_volume = 0.0;
+          if (indices_valid) {
+            for (std::size_t index = 0U; index < mesh.indices.size(); index += 3U) {
+              const auto point = [&](std::uint32_t vertex, std::size_t axis) {
+                return static_cast<double>(
+                    mesh.positions[static_cast<std::size_t>(vertex) * 3U + axis]);
+              };
+              const auto a = mesh.indices[index];
+              const auto b = mesh.indices[index + 1U];
+              const auto c = mesh.indices[index + 2U];
+              signed_volume +=
+                  (point(a, 0U) * (point(b, 1U) * point(c, 2U) - point(b, 2U) * point(c, 1U)) -
+                   point(a, 1U) * (point(b, 0U) * point(c, 2U) - point(b, 2U) * point(c, 0U)) +
+                   point(a, 2U) * (point(b, 0U) * point(c, 1U) - point(b, 1U) * point(c, 0U))) /
+                  6.0;
+            }
+          }
+          saw_mesh = mesh.positions.size() == 24U && indices_valid &&
+                     std::abs(signed_volume - 252500.0) <= 1.0e-6 &&
+                     bounds == std::array<float, 6>{0.0F, 0.0F, -1.0F, 250.0F, 1010.0F, 0.0F};
+        }
+      }
+    }
+    CHECK(saw_identity, "a persisted type-73 row has a stable surface-treatment identity");
+    CHECK(saw_name && saw_thickness && saw_material,
+          "surface-treatment attributes expose name, thickness, and material semantics");
+    CHECK(saw_father, "the persisted father relation owns the surface treatment");
+    CHECK(saw_mesh, "a tile surface becomes its persisted one-millimetre treatment solid");
+
+    ProcessRequest local_request;
+    local_request.stages = Stage::display_geometry;
+    local_request.mesh_coordinate_mode = MeshCoordinateMode::local_with_rigid_placement;
+    auto local_processed = surface_treatment_model.value().process(local_request);
+    CHECK(local_processed.has_value(), "surface-treatment local-mesh processing is available");
+    bool saw_local_mesh = false;
+    if (local_processed) {
+      while (true) {
+        auto batch = local_processed.value()->next();
+        CHECK(batch.has_value(), "surface-treatment local-mesh batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          if (mesh.object_id != 1301U || mesh.positions.empty()) continue;
+          std::array<float, 6> bounds{mesh.positions[0], mesh.positions[1], mesh.positions[2],
+                                      mesh.positions[0], mesh.positions[1], mesh.positions[2]};
+          for (std::size_t index = 3U; index < mesh.positions.size(); index += 3U) {
+            for (std::size_t axis = 0U; axis < 3U; ++axis) {
+              bounds[axis] = std::min(bounds[axis], mesh.positions[index + axis]);
+              bounds[axis + 3U] = std::max(bounds[axis + 3U], mesh.positions[index + axis]);
+            }
+          }
+          saw_local_mesh =
+              mesh.coordinate_space == MeshCoordinateMode::local_with_rigid_placement &&
+              bounds == std::array<float, 6>{0.0F, 0.0F, -1.0F, 250.0F, 1010.0F, 0.0F} &&
+              mesh.placement.origin.x == 0.0 && mesh.placement.origin.y == 0.0 &&
+              mesh.placement.origin.z == 0.0 && mesh.placement.x_axis.x == 1.0 &&
+              mesh.placement.y_axis.y == 1.0 && mesh.placement.z_axis.z == 1.0;
+        }
+      }
+    }
+    CHECK(saw_local_mesh,
+          "surface treatments expose reusable local geometry with a rigid model placement");
   }
 
   const auto parallel_leg_weld_bytes = database_with_polygon_weld_geometry(
