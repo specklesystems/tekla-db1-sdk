@@ -11,6 +11,10 @@ compatibility policy in the support matrix.
 - Opt-in placed display meshes expose object-local float coordinates with a
   per-mesh rigid placement while preserving model-space output as the default
   and falling back independently for non-rigid persisted frames.
+- Persisted weld common/seam attributes emit ordinary `Tekla` properties for
+  workshop/site, around, compound, logical, intermittent, size, and type
+  semantics. Weld occurrences are decoded row-by-row into bounded reusable
+  property batches rather than retained for the life of the stream.
 - `ObjectRole`, `object_role`, and `is_model_element` distinguish independently
   publishable model elements from Boolean-part and cut-plane evaluation
   features while retaining all persisted identities for raw processing.
@@ -86,6 +90,8 @@ Initial release candidate of the read-only, output-neutral C++20 SDK.
   tolerance-bounded adapter parity case rather than an exact SDK scalar.
 - OCCT topology evaluation is optional and excluded from the WASM-oriented core
   path.
+- Polygon-weld display geometry is not yet decoded; supported weld identities
+  and native properties remain available as semantic-only objects.
 
 See `docs/support-matrix.md` for the precise implemented contract and
 `docs/releasing.md` for the release gates.

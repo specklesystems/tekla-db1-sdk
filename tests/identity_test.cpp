@@ -1572,6 +1572,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 
     ProcessRequest property_request;
     property_request.stages = Stage::properties;
+    property_request.batch_memory_budget_bytes = sizeof(PropertyView) * 11U;
     auto properties = weld_model.value().process(property_request);
     CHECK(properties.has_value(), "weld property processing is available without part rows");
     bool saw_shop = false;
@@ -1591,7 +1592,11 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
         CHECK(batch.has_value(), "weld property batches decode without an error");
         if (!batch || batch.value().kind == BatchKind::end) break;
         if (batch.value().kind != BatchKind::properties) continue;
+        std::unordered_set<std::uint64_t> batch_welds;
         for (const auto& property : batch.value().properties) {
+          if (property.group == "Tekla" && property.name.starts_with("weld")) {
+            batch_welds.insert(property.object_id);
+          }
           if (property.object_id != 1201U || property.group != "Tekla") {
             continue;
           }
@@ -1626,6 +1631,8 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
                                     property.kind == PropertyValueKind::integer &&
                                     property.integer_value == 0;
         }
+        CHECK(batch_welds.size() <= 1U,
+              "a one-occurrence weld property budget bounds each reusable output batch");
       }
     }
     CHECK(saw_shop && saw_around && saw_compound && saw_logical && saw_intermittent_type,

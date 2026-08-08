@@ -308,20 +308,6 @@ class IdentityReader final : public BatchReader {
   return Result<ObjectOffsets>::success(result);
 }
 
-[[nodiscard]] Result<std::unordered_map<std::uint32_t, WeldLocation>> weld_locations(
-    const ModelStorage& storage, const Schema& schema) {
-  std::unordered_map<std::uint32_t, WeldLocation> result;
-  auto welds = load_weld_semantics(storage, schema);
-  if (!welds) {
-    return Result<std::unordered_map<std::uint32_t, WeldLocation>>::failure(welds.error());
-  }
-  result.reserve(welds.value().size());
-  for (const auto& weld : welds.value()) {
-    result.insert_or_assign(weld.object_id, weld.common.location);
-  }
-  return Result<std::unordered_map<std::uint32_t, WeldLocation>>::success(std::move(result));
-}
-
 }  // namespace
 
 Result<ProcessStream> make_identity_stream(std::shared_ptr<const ModelStorage> storage,
@@ -379,7 +365,7 @@ Result<ProcessStream> make_identity_stream(std::shared_ptr<const ModelStorage> s
     }
   }
 
-  auto locations = weld_locations(*storage, schema);
+  auto locations = load_weld_locations(*storage, schema);
   if (!locations) {
     return Result<ProcessStream>::failure(locations.error());
   }
