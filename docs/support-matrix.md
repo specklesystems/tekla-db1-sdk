@@ -38,6 +38,7 @@ guessed geometry.
 | Capability | Status | Notes |
 | --- | --- | --- |
 | Straight-part definitions | Implemented | Emits stored coordinate frame, length, profile spelling, and form type. |
+| Placed display meshes | Implemented subset | `ProcessRequest::mesh_coordinate_mode` defaults to model-space compatibility. Opt-in `local_with_rigid_placement` emits object-local positions plus a per-mesh right-handed rigid placement when the persisted part frame is trustworthy; invalid, reflected, skewed, or unavailable frames fall back independently to model-space output. Placement axes are matrix columns and reconstruct model coordinates as `origin + x*x_axis + y*y_axis + z*z_axis`. |
 | Variable rectangular parts | Implemented subset | PL_V forms 51 and 61 are emitted as rectangular frusta; persisted type-11 socket children are subtracted when topology evaluation is enabled. |
 | Literal rectangular and plate profiles | Implemented | Analytic extrusion. |
 | Literal angle, round, and hollow profiles | Implemented | Analytic extrusion for self-describing dimensions. |

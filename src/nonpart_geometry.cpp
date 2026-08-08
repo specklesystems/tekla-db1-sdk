@@ -1179,6 +1179,31 @@ struct WeldFilletFrame {
   Vector3d second;
 };
 
+// Returns the first vertex index for an indexed-mesh append when both position
+// arrays are complete XYZ triples and the aggregate remains uint32-addressable.
+[[nodiscard]] constexpr std::optional<std::uint32_t> checked_indexed_mesh_append_base(
+    std::size_t existing_position_count, std::size_t appended_position_count) noexcept {
+  if (existing_position_count % 3U != 0U || appended_position_count % 3U != 0U) {
+    return std::nullopt;
+  }
+  const auto existing_vertices = existing_position_count / 3U;
+  const auto appended_vertices = appended_position_count / 3U;
+  constexpr auto maximum = std::numeric_limits<std::uint32_t>::max();
+  if (existing_vertices > maximum || appended_vertices > maximum - existing_vertices) {
+    return std::nullopt;
+  }
+  return static_cast<std::uint32_t>(existing_vertices);
+}
+
+constexpr auto kMaximumIndexedVertex = std::numeric_limits<std::uint32_t>::max();
+static_assert(checked_indexed_mesh_append_base(12U, 9U) == 4U);
+static_assert(
+    checked_indexed_mesh_append_base(static_cast<std::size_t>(kMaximumIndexedVertex - 1U) * 3U,
+                                     3U) == kMaximumIndexedVertex - 1U);
+static_assert(!checked_indexed_mesh_append_base(
+    static_cast<std::size_t>(kMaximumIndexedVertex - 1U) * 3U, 9U));
+static_assert(!checked_indexed_mesh_append_base(4U, 3U));
+
 [[nodiscard]] std::optional<WeldFilletFrame> weld_fillet_frame(Vector3d first_value,
                                                                Vector3d second_value,
                                                                Vector3d start,
@@ -1434,20 +1459,6 @@ class NonPartReader final : public BatchReader {
 };
 
 }  // namespace
-
-std::optional<std::uint32_t> checked_indexed_mesh_append_base(
-    std::size_t existing_position_count, std::size_t appended_position_count) noexcept {
-  if (existing_position_count % 3U != 0U || appended_position_count % 3U != 0U) {
-    return std::nullopt;
-  }
-  const auto existing_vertices = existing_position_count / 3U;
-  const auto appended_vertices = appended_position_count / 3U;
-  constexpr auto maximum = std::numeric_limits<std::uint32_t>::max();
-  if (existing_vertices > maximum || appended_vertices > maximum - existing_vertices) {
-    return std::nullopt;
-  }
-  return static_cast<std::uint32_t>(existing_vertices);
-}
 
 std::optional<FastenerDimensions> known_fastener_dimensions(std::string_view standard,
                                                             double diameter) noexcept {

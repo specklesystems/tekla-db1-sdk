@@ -334,7 +334,15 @@ struct GeometryEvaluationCache::Impl {
                                              std::uint64_t object_id) const {
     if (std::getenv("TEKLA_DB1_DISABLE_OCCT_CACHE") != nullptr) return std::nullopt;
     const auto found = entries.find(key);
-    if (found == entries.end()) return std::nullopt;
+    if (found == entries.end()) {
+      if (std::getenv("TEKLA_DB1_OCCT_CACHE_PROFILE") != nullptr) {
+        std::fprintf(stderr,
+                     "{\"occt_cache\":true,\"object_id\":%llu,\"outcome\":\"miss\","
+                     "\"key_bytes\":%zu}\n",
+                     static_cast<unsigned long long>(object_id), key.bytes.size());
+      }
+      return std::nullopt;
+    }
     OcctMesh mesh = found->second.mesh;
     mesh.object_id = object_id;
     for (std::size_t index = 0U; index + 2U < mesh.positions.size(); index += 3U) {
@@ -379,7 +387,16 @@ struct GeometryEvaluationCache::Impl {
                                              : sizeof(CacheEntry);
     const std::size_t entry_bytes = key.bytes.size() + mesh.positions.size() * sizeof(float) +
                                     mesh.indices.size() * sizeof(std::uint32_t) + accounting_entry;
-    if (entries.size() >= kMaximumEntries || entry_bytes > kMaximumBytes - bytes) return;
+    if (entries.size() >= kMaximumEntries || entry_bytes > kMaximumBytes - bytes) {
+      if (std::getenv("TEKLA_DB1_OCCT_CACHE_PROFILE") != nullptr) {
+        std::fprintf(stderr,
+                     "{\"occt_cache\":true,\"object_id\":%llu,"
+                     "\"outcome\":\"not_retained\",\"entry_bytes\":%zu,"
+                     "\"total_bytes\":%zu}\n",
+                     static_cast<unsigned long long>(mesh.object_id), entry_bytes, bytes);
+      }
+      return;
+    }
     CacheEntry entry{placement, mesh};
     const bool inserted = entries.emplace(std::move(key), std::move(entry)).second;
     if (!inserted) return;
@@ -426,6 +443,14 @@ Result<OcctMesh> GeometryEvaluationCache::evaluate(const OcctRequest& request,
                                                    const Evaluator& evaluator) {
   if (std::getenv("TEKLA_DB1_DISABLE_OCCT_CACHE") != nullptr ||
       !safe_world_float_request(request)) {
+    if (std::getenv("TEKLA_DB1_OCCT_CACHE_PROFILE") != nullptr) {
+      std::fprintf(
+          stderr,
+          "{\"occt_cache\":true,\"object_id\":%llu,"
+          "\"outcome\":\"bypass\",\"reason\":\"%s\"}\n",
+          static_cast<unsigned long long>(request.object_id),
+          std::getenv("TEKLA_DB1_DISABLE_OCCT_CACHE") != nullptr ? "disabled" : "float_ulp");
+    }
     return evaluator(request);
   }
   auto rigid = rigid_key(request, placement);

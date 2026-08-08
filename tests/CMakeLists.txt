@@ -59,6 +59,10 @@ if(TEKLA_DB1_ENABLE_OCCT)
   tekla_db1_enable_sanitizers(tekla_db1_geometry_evaluation_cache_test)
   add_test(NAME geometry_evaluation_cache_contract
     COMMAND tekla_db1_geometry_evaluation_cache_test)
+  add_test(NAME geometry_evaluation_cache_profile_contract
+    COMMAND ${CMAKE_COMMAND}
+      -DCACHE_FIXTURE=$<TARGET_FILE:tekla_db1_geometry_evaluation_cache_test>
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/geometry_evaluation_cache_profile.cmake)
 endif()
 
 if(TEKLA_DB1_ENABLE_OCCT AND TARGET tekla-db1-occt-worker)

@@ -20,11 +20,6 @@ struct FastenerDimensions {
   double height = 0.0;
 };
 
-// Returns the first vertex index for an indexed-mesh append when both position
-// arrays are complete XYZ triples and the aggregate remains uint32-addressable.
-[[nodiscard]] std::optional<std::uint32_t> checked_indexed_mesh_append_base(
-    std::size_t existing_position_count, std::size_t appended_position_count) noexcept;
-
 [[nodiscard]] std::optional<FastenerDimensions> known_fastener_dimensions(std::string_view standard,
                                                                           double diameter) noexcept;
 
