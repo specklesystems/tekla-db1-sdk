@@ -913,6 +913,171 @@ std::vector<std::byte> database_with_one_object(
   return bytes;
 }
 
+void append_polygon_weld_table(std::vector<std::byte>& bytes,
+                               const tekla::db1::detail::Schema& schema,
+                               const tekla::db1::detail::TableSchema& table, bool final,
+                               bool malformed_polygon, bool semantic_only) {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
+                                                  std::byte{0x00}};
+  append_u32(bytes, table.tuple_size);
+  append_u32(bytes, table.descriptor_count);
+  for (const auto descriptor : schema.table_descriptors(table)) append_u32(bytes, descriptor);
+
+  const auto append_tuple = [&](const auto& write) {
+    bytes.push_back(std::byte{0});
+    const auto tuple_offset = bytes.size();
+    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+    write(tuple);
+    append_u32(bytes, 10'001U);
+    append_u32(bytes, 20'001U);
+  };
+  const auto write_scalar = [](std::span<std::byte> tuple,
+                               const tekla::db1::detail::FieldSchema& field, double value) {
+    if (field.type == tekla::db1::detail::FieldType::f32) {
+      write_u32(tuple, field.offset, std::bit_cast<std::uint32_t>(static_cast<float>(value)));
+    } else {
+      write_f64(tuple, field.offset, value);
+    }
+  };
+
+  if (table.name == "object") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1201U);
+        if (field.name == "type") write_u32(tuple, field.offset, 13U);
+        if (field.name == "guid") {
+          for (std::size_t index = 0; index < field.size; ++index) {
+            tuple[field.offset + index] = static_cast<std::byte>(0x40U + index);
+          }
+        }
+      }
+    });
+  } else if (table.name == "coordsys_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 901U);
+        if (field.name == "xdir_x") write_scalar(tuple, field, 0.0);
+        if (field.name == "xdir_y") write_scalar(tuple, field, 1.0);
+        if (field.name == "xdir_z") write_scalar(tuple, field, 0.0);
+        if (field.name == "ydir_x") write_scalar(tuple, field, -1.0);
+        if (field.name == "ydir_y") write_scalar(tuple, field, 0.0);
+        if (field.name == "ydir_z") write_scalar(tuple, field, 0.0);
+      }
+    });
+  } else if (table.name == "coordsys") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1201U);
+        if (field.name == "csys_attr_id") write_u32(tuple, field.offset, 901U);
+        if (field.name == "x1") write_scalar(tuple, field, 100.0);
+        if (field.name == "y1") write_scalar(tuple, field, 200.0);
+        if (field.name == "z1") write_scalar(tuple, field, 300.0);
+      }
+    });
+  } else if (table.name == "part_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 999U);
+        if (field.name == "prof") write_fixed(tuple, field.offset, field.size, "200*10");
+      }
+    });
+  } else if (table.name == "welding") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1201U);
+        if (field.name == "weld_common_attr_id") write_u32(tuple, field.offset, 902U);
+        if (field.name == "weld_seam1_id") write_u32(tuple, field.offset, 903U);
+      }
+    });
+  } else if (table.name == "welding_common_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 902U);
+        if (field.name == "workshop_weld") write_u32(tuple, field.offset, 1U);
+        if (field.name == "compound_weld" || field.name == "logical_weld") {
+          write_u32(tuple, field.offset, semantic_only ? 1U : 0U);
+        }
+      }
+    });
+  } else if (table.name == "welding_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 903U);
+        if (field.name == "size") write_scalar(tuple, field, 5.0);
+        if (field.name == "type") write_u32(tuple, field.offset, 10U);
+      }
+    });
+  } else if (table.name == "relation") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 951U);
+        if (field.name == "type") write_u32(tuple, field.offset, 40'001U);
+        if (field.name == "id1") write_u32(tuple, field.offset, 1201U);
+        if (field.name == "id2") write_u32(tuple, field.offset, 950U);
+      }
+    });
+  } else if (table.name == "weldingpolygon") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      constexpr std::array<tekla::db1::Vector3d, 4> points{{
+          {0.0, 0.0, 0.0},
+          {0.0, 1.0, 0.0},
+          {0.0, 0.0, 1.0},
+          {10.0, 0.0, 0.0},
+      }};
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 950U);
+        if (field.name == "no") write_u32(tuple, field.offset, 0U);
+        if (field.name == "number_of_points_in_row") {
+          write_u32(tuple, field.offset, malformed_polygon ? 5U : 4U);
+        }
+        if (field.name == "type") write_u32(tuple, field.offset, 1U);
+        for (std::size_t index = 0; index < points.size(); ++index) {
+          const auto suffix = std::to_string(index + 1U);
+          if (field.name == "x" + suffix) write_scalar(tuple, field, points[index].x);
+          if (field.name == "y" + suffix) write_scalar(tuple, field, points[index].y);
+          if (field.name == "z" + suffix) write_scalar(tuple, field, points[index].z);
+        }
+      }
+    });
+  }
+
+  bytes.push_back(std::byte{0});
+  if (final) {
+    bytes.insert(bytes.end(), final_footer.begin(), final_footer.end());
+  } else {
+    bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  }
+}
+
+std::vector<std::byte> database_with_polygon_weld_geometry(bool malformed_polygon = false,
+                                                           bool semantic_only = false) {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::string_view format = "9.66";
+  const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
+  CHECK(schema != nullptr, "the polygon-weld fixture schema is registered");
+  std::vector<std::byte> bytes;
+  append_ascii(bytes, "Xsteel");
+  bytes.push_back(std::byte{0x85});
+  bytes.push_back(std::byte{' '});
+  const auto* format_first = reinterpret_cast<const std::byte*>(format.data());
+  bytes.insert(bytes.end(), format_first, format_first + format.size());
+  append_ascii(bytes, " 7d72d8c9-0250-4f3a-8760-bcef517f016e");
+  append_u32(bytes, 1U);
+  bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  if (schema != nullptr) {
+    for (std::size_t index = 0; index < schema->tables.size(); ++index) {
+      append_polygon_weld_table(bytes, *schema, schema->tables[index],
+                                index + 1U == schema->tables.size(), malformed_polygon,
+                                semantic_only);
+    }
+  }
+  return bytes;
+}
+
 std::vector<std::byte> database_with_relationship_semantics(std::string_view format) {
   return database_with_one_object("200*10", "14", format, false, 7U, false, false, false, false,
                                   false, false, false, false, false, false, false, false, false,
@@ -1640,6 +1805,148 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     CHECK(saw_size_above && saw_type_above && saw_intermittent_above && saw_size_below &&
               saw_type_below && saw_intermittent_below,
           "linked weld seams expose native above/below size, type, and intermittent values");
+  }
+
+  const auto polygon_weld_bytes = database_with_polygon_weld_geometry();
+  ModelPackage polygon_weld_package;
+  polygon_weld_package.add(
+      Asset::copy(AssetRole::model_database, "polygon-weld.db1", polygon_weld_bytes));
+  auto polygon_weld_model = open(std::move(polygon_weld_package));
+  CHECK(polygon_weld_model.has_value(), "a persisted polygon-weld database opens");
+  if (polygon_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = polygon_weld_model.value().process(request);
+    CHECK(processed.has_value(), "polygon-weld display processing is available");
+    bool saw_weld_mesh = false;
+    bool saw_polygon_record_mesh = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "polygon-weld display batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          saw_polygon_record_mesh = saw_polygon_record_mesh || mesh.object_id == 950U;
+          if (mesh.object_id != 1201U || mesh.positions.empty()) continue;
+          std::array<float, 6> bounds{mesh.positions[0], mesh.positions[1], mesh.positions[2],
+                                      mesh.positions[0], mesh.positions[1], mesh.positions[2]};
+          for (std::size_t index = 3U; index < mesh.positions.size(); index += 3U) {
+            for (std::size_t axis = 0; axis < 3U; ++axis) {
+              bounds[axis] = std::min(bounds[axis], mesh.positions[index + axis]);
+              bounds[axis + 3U] = std::max(bounds[axis + 3U], mesh.positions[index + axis]);
+            }
+          }
+          const bool indices_valid =
+              mesh.indices.size() % 3U == 0U &&
+              std::all_of(mesh.indices.begin(), mesh.indices.end(),
+                          [&](std::uint32_t index) { return index < mesh.positions.size() / 3U; });
+          constexpr std::array<float, 6> expected_bounds{95.0F,  200.0F, 300.0F,
+                                                         100.0F, 210.0F, 305.0F};
+          saw_weld_mesh = mesh.positions.size() == 18U && mesh.indices.size() == 24U &&
+                          indices_valid && bounds == expected_bounds;
+        }
+      }
+    }
+    CHECK(saw_weld_mesh,
+          "a persisted fillet path becomes a bounded triangular mesh on the weld object");
+    CHECK(!saw_polygon_record_mesh,
+          "polygon storage IDs remain internal and do not become display owners");
+  }
+
+  const auto malformed_polygon_weld_bytes = database_with_polygon_weld_geometry(true);
+  ModelPackage malformed_polygon_weld_package;
+  malformed_polygon_weld_package.add(Asset::copy(
+      AssetRole::model_database, "malformed-polygon-weld.db1", malformed_polygon_weld_bytes));
+  auto malformed_polygon_weld_model = open(std::move(malformed_polygon_weld_package));
+  CHECK(malformed_polygon_weld_model.has_value(), "a malformed polygon-weld database opens");
+  if (malformed_polygon_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = malformed_polygon_weld_model.value().process(request);
+    CHECK(processed.has_value(), "malformed polygon-weld processing remains object-scoped");
+    bool emitted_mesh = false;
+    bool saw_invalid_geometry = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "malformed polygon-weld batches fail open");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          emitted_mesh = emitted_mesh || mesh.object_id == 1201U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_invalid_geometry =
+              saw_invalid_geometry ||
+              (diagnostic.object_id == 1201U && diagnostic.code == ErrorCode::invalid_geometry &&
+               diagnostic.message.find("polygon-weld") != std::string_view::npos);
+        }
+      }
+    }
+    CHECK(!emitted_mesh && saw_invalid_geometry,
+          "an incomplete persisted weld path is omitted with an object-scoped diagnostic");
+  }
+
+  ModelPackage bounded_polygon_weld_package;
+  bounded_polygon_weld_package.add(
+      Asset::copy(AssetRole::model_database, "bounded-polygon-weld.db1", polygon_weld_bytes));
+  auto bounded_polygon_weld_model = open(std::move(bounded_polygon_weld_package));
+  CHECK(bounded_polygon_weld_model.has_value(), "a bounded polygon-weld database opens");
+  if (bounded_polygon_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    request.geometry_memory_budget_bytes = 192U;
+    auto processed = bounded_polygon_weld_model.value().process(request);
+    CHECK(processed.has_value(), "bounded polygon-weld processing remains object-scoped");
+    bool emitted_mesh = false;
+    bool saw_resource_limit = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "bounded polygon-weld batches fail open");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          emitted_mesh = emitted_mesh || mesh.object_id == 1201U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_resource_limit =
+              saw_resource_limit ||
+              (diagnostic.object_id == 1201U && diagnostic.code == ErrorCode::resource_limit &&
+               diagnostic.message.find("Polygon-weld") != std::string_view::npos);
+        }
+      }
+    }
+    CHECK(!emitted_mesh && saw_resource_limit,
+          "polygon-weld retained rows and meshes honor the aggregate geometry budget");
+  }
+
+  const auto semantic_only_weld_bytes = database_with_polygon_weld_geometry(false, true);
+  ModelPackage semantic_only_weld_package;
+  semantic_only_weld_package.add(Asset::copy(
+      AssetRole::model_database, "semantic-only-polygon-weld.db1", semantic_only_weld_bytes));
+  auto semantic_only_weld_model = open(std::move(semantic_only_weld_package));
+  CHECK(semantic_only_weld_model.has_value(), "a logical compound-weld database opens");
+  if (semantic_only_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = semantic_only_weld_model.value().process(request);
+    CHECK(processed.has_value(), "logical compound-weld processing remains available");
+    bool emitted_mesh = false;
+    bool emitted_diagnostic = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "logical compound-weld batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          emitted_mesh = emitted_mesh || mesh.object_id == 1201U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          emitted_diagnostic = emitted_diagnostic || diagnostic.object_id == 1201U;
+        }
+      }
+    }
+    CHECK(!emitted_mesh && !emitted_diagnostic,
+          "logical and compound welds remain semantic-only without guessed geometry");
   }
 
   ModelPackage semantic_package;

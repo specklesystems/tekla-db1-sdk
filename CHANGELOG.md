@@ -15,6 +15,10 @@ compatibility policy in the support matrix.
   workshop/site, around, compound, logical, intermittent, size, and type
   semantics. Weld occurrences are decoded row-by-row into bounded reusable
   property batches rather than retained for the life of the stream.
+- Proven modern polygon-weld fillet paths emit closed `MeshView` display
+  geometry on their owning weld objects. Persisted rows and generated meshes
+  share the non-part geometry memory budget and malformed paths fail open with
+  object-scoped diagnostics.
 - `ObjectRole`, `object_role`, and `is_model_element` distinguish independently
   publishable model elements from Boolean-part and cut-plane evaluation
   features while retaining all persisted identities for raw processing.

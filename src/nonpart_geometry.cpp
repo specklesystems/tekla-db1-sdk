@@ -76,6 +76,28 @@ struct MeshData {
   std::vector<std::uint32_t> indices;
 };
 
+struct WeldDefinition {
+  std::uint32_t common_attribute_id = 0;
+  std::uint32_t above_attribute_id = 0;
+  std::uint32_t below_attribute_id = 0;
+};
+
+struct WeldCommonGeometry {
+  bool compound = false;
+  bool logical = false;
+};
+
+struct WeldSeamGeometry {
+  double size = 0.0;
+  std::uint32_t type = 0;
+};
+
+struct WeldPolygonRow {
+  std::uint32_t number = 0;
+  std::uint32_t type = 0;
+  std::vector<Vector3d> values;
+};
+
 struct DiagnosticData {
   ErrorCode code = ErrorCode::decoder_unavailable;
   std::uint64_t object_id = 0;
@@ -1118,6 +1140,71 @@ void append_cylinder(MeshData& mesh, Vector3d start, Vector3d end, double radius
   append_prism(mesh, start, end, *first, cross(*axis, *first), radius, facets);
 }
 
+[[nodiscard]] bool append_weld_fillet_sweep(MeshData& mesh, std::span<const Vector3d> values,
+                                            double size, const CoordinateSystem& system,
+                                            const Axes& system_axes) {
+  if (values.size() < 4U || (values.size() - 1U) % 3U != 0U || !std::isfinite(size) || size <= 0.0)
+    return false;
+  const auto segment_count = (values.size() - 1U) / 3U;
+  if (segment_count == 0U || segment_count > (std::numeric_limits<std::uint32_t>::max() / 3U) - 1U)
+    return false;
+  for (std::size_t segment = 0U; segment < segment_count; ++segment) {
+    const auto first = normalized(values[segment * 3U + 1U]);
+    const auto second = normalized(values[segment * 3U + 2U]);
+    const auto length = vector_length(subtract(values[(segment + 1U) * 3U], values[segment * 3U]));
+    if (!first || !second || !std::isfinite(length) || length <= 1.0e-9 ||
+        std::abs(vector_length(cross(*first, *second)) - 1.0) > 1.0e-6)
+      return false;
+  }
+
+  const auto position_growth = (segment_count + 1U) * 9U;
+  const auto index_growth = segment_count * 18U + 6U;
+  if (position_growth > mesh.positions.max_size() - mesh.positions.size() ||
+      index_growth > mesh.indices.max_size() - mesh.indices.size())
+    return false;
+  mesh.positions.reserve(mesh.positions.size() + position_growth);
+  mesh.indices.reserve(mesh.indices.size() + index_growth);
+
+  const auto first_vertex = static_cast<std::uint32_t>(mesh.positions.size() / 3U);
+  for (std::size_t point = 0U; point <= segment_count; ++point) {
+    const auto frame = std::min(point, segment_count - 1U);
+    const auto first = normalized(values[frame * 3U + 1U]);
+    const auto second = normalized(values[frame * 3U + 2U]);
+    if (!first || !second || std::abs(vector_length(cross(*first, *second)) - 1.0) > 1.0e-6)
+      return false;
+    const auto origin = values[point * 3U];
+    const std::array<Vector3d, 3> ring{
+        origin,
+        add(origin, scale(*first, size)),
+        add(origin, scale(*second, size)),
+    };
+    for (const auto local : ring) {
+      const auto model = transform(local, system, system_axes);
+      if (!std::isfinite(model.x) || !std::isfinite(model.y) || !std::isfinite(model.z) ||
+          std::abs(model.x) > std::numeric_limits<float>::max() ||
+          std::abs(model.y) > std::numeric_limits<float>::max() ||
+          std::abs(model.z) > std::numeric_limits<float>::max())
+        return false;
+      mesh.positions.insert(
+          mesh.positions.end(),
+          {static_cast<float>(model.x), static_cast<float>(model.y), static_cast<float>(model.z)});
+    }
+  }
+  for (std::uint32_t segment = 0U; segment < segment_count; ++segment) {
+    const auto current = first_vertex + segment * 3U;
+    const auto next = current + 3U;
+    for (std::uint32_t side = 0U; side < 3U; ++side) {
+      const auto adjacent = (side + 1U) % 3U;
+      mesh.indices.insert(mesh.indices.end(), {current + side, current + adjacent, next + adjacent,
+                                               current + side, next + adjacent, next + side});
+    }
+  }
+  const auto last = first_vertex + static_cast<std::uint32_t>(segment_count) * 3U;
+  mesh.indices.insert(mesh.indices.end(), {first_vertex, first_vertex + 2U, first_vertex + 1U, last,
+                                           last + 1U, last + 2U});
+  return true;
+}
+
 class NonPartReader final : public BatchReader {
  public:
   NonPartReader(std::vector<CurveData> curves, std::vector<MeshData> meshes,
@@ -1466,6 +1553,230 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
                              {scalar(tuple, *x), scalar(tuple, *y), scalar(tuple, *z)},
                              length == nullptr ? 0.0 : scalar(tuple, *length)});
       }
+    }
+  }
+
+  // Modern polygon welds persist a local fillet path as repeating
+  // [position, first-leg direction, second-leg direction] values followed by
+  // the final position. Relation 40001 owns each polygon group from the weld
+  // object; polygon types 1 and 2 select its above and below seam records.
+  std::unordered_map<std::uint32_t, WeldDefinition> weld_definitions;
+  if (const auto* welding =
+          populated_table(*storage, schema, std::array<std::string_view, 1>{"welding"})) {
+    const auto* id = find_field(schema, *welding, "id");
+    const auto* common = find_field(schema, *welding, "weld_common_attr_id");
+    const auto* above = find_field(schema, *welding, "weld_seam1_id");
+    const auto* below = find_field(schema, *welding, "weld_seam2_id");
+    if (id != nullptr && common != nullptr && above != nullptr && below != nullptr) {
+      const auto& layout = storage->layout.tables[welding->ordinal];
+      weld_definitions.reserve(static_cast<std::size_t>(layout.info.row_count));
+      for (std::uint64_t row = 0; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(storage->payload.bytes(), row);
+        if (hidden(record)) continue;
+        const auto tuple = record.subspan(1U, welding->tuple_size);
+        weld_definitions.insert_or_assign(
+            read_u32(tuple, id->offset),
+            WeldDefinition{read_u32(tuple, common->offset), read_u32(tuple, above->offset),
+                           read_u32(tuple, below->offset)});
+      }
+    }
+  }
+  std::unordered_map<std::uint32_t, WeldCommonGeometry> weld_common_geometry;
+  if (const auto* common = populated_table(
+          *storage, schema, std::array<std::string_view, 1>{"welding_common_attr"})) {
+    const auto* id = find_field(schema, *common, "id");
+    const auto* compound = find_field(schema, *common, "compound_weld");
+    const auto* logical = find_field(schema, *common, "logical_weld");
+    if (id != nullptr && compound != nullptr && logical != nullptr) {
+      const auto& layout = storage->layout.tables[common->ordinal];
+      weld_common_geometry.reserve(static_cast<std::size_t>(layout.info.row_count));
+      for (std::uint64_t row = 0; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(storage->payload.bytes(), row);
+        if (hidden(record)) continue;
+        const auto tuple = record.subspan(1U, common->tuple_size);
+        weld_common_geometry.insert_or_assign(
+            read_u32(tuple, id->offset),
+            WeldCommonGeometry{read_u32(tuple, compound->offset) != 0U,
+                               read_u32(tuple, logical->offset) != 0U});
+      }
+    }
+  }
+  std::unordered_map<std::uint32_t, WeldSeamGeometry> weld_seam_geometry;
+  if (const auto* seams =
+          populated_table(*storage, schema, std::array<std::string_view, 1>{"welding_attr"})) {
+    const auto* id = find_field(schema, *seams, "id");
+    const auto* size = find_field(schema, *seams, "size");
+    const auto* type = find_field(schema, *seams, "type");
+    if (id != nullptr && size != nullptr && type != nullptr) {
+      const auto& layout = storage->layout.tables[seams->ordinal];
+      weld_seam_geometry.reserve(static_cast<std::size_t>(layout.info.row_count));
+      for (std::uint64_t row = 0; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(storage->payload.bytes(), row);
+        if (hidden(record)) continue;
+        const auto tuple = record.subspan(1U, seams->tuple_size);
+        weld_seam_geometry.insert_or_assign(
+            read_u32(tuple, id->offset),
+            WeldSeamGeometry{scalar(tuple, *size), read_u32(tuple, type->offset)});
+      }
+    }
+  }
+  std::unordered_map<std::uint32_t, std::uint32_t> weld_polygon_owners;
+  if (const auto* relations = schema.find_table("relation")) {
+    const auto* type = find_field(schema, *relations, "type");
+    const auto* source = find_field(schema, *relations, "id1");
+    const auto* target = find_field(schema, *relations, "id2");
+    if (type != nullptr && source != nullptr && target != nullptr) {
+      const auto& layout = storage->layout.tables[relations->ordinal];
+      for (std::uint64_t row = 0; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(storage->payload.bytes(), row);
+        if (hidden(record)) continue;
+        const auto tuple = record.subspan(1U, relations->tuple_size);
+        if (read_u32(tuple, type->offset) != 40'001U) continue;
+        const auto weld_id = read_u32(tuple, source->offset);
+        const auto object = object_types.find(weld_id);
+        if (weld_id < request.geometry_object_id_min || weld_id > request.geometry_object_id_max ||
+            object == object_types.end() || object->second.type != 13U ||
+            !weld_definitions.contains(weld_id))
+          continue;
+        weld_polygon_owners.insert_or_assign(read_u32(tuple, target->offset), weld_id);
+      }
+    }
+  }
+  std::unordered_map<std::uint32_t, std::vector<WeldPolygonRow>> weld_polygon_rows;
+  std::unordered_set<std::uint32_t> invalid_weld_polygons;
+  std::unordered_set<std::uint32_t> limited_weld_polygons;
+  if (const auto* polygons =
+          populated_table(*storage, schema, std::array<std::string_view, 1>{"weldingpolygon"})) {
+    const auto* id = find_field(schema, *polygons, "id");
+    const auto* number = find_field(schema, *polygons, "no");
+    const auto* count = find_field(schema, *polygons, "number_of_points_in_row");
+    const auto* type = find_field(schema, *polygons, "type");
+    if (id != nullptr && number != nullptr && count != nullptr && type != nullptr) {
+      const auto& layout = storage->layout.tables[polygons->ordinal];
+      for (std::uint64_t row = 0; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(storage->payload.bytes(), row);
+        if (hidden(record)) continue;
+        const auto tuple = record.subspan(1U, polygons->tuple_size);
+        const auto polygon_id = read_u32(tuple, id->offset);
+        const auto owner = weld_polygon_owners.find(polygon_id);
+        if (owner == weld_polygon_owners.end()) continue;
+        const auto polygon_type = read_u32(tuple, type->offset);
+        const auto weld = weld_definitions.find(owner->second);
+        if (weld == weld_definitions.end()) continue;
+        const auto common = weld_common_geometry.find(weld->second.common_attribute_id);
+        if (common == weld_common_geometry.end() || common->second.compound ||
+            common->second.logical)
+          continue;
+        const auto seam_id = polygon_type == 1U   ? weld->second.above_attribute_id
+                             : polygon_type == 2U ? weld->second.below_attribute_id
+                                                  : 0U;
+        const auto seam = weld_seam_geometry.find(seam_id);
+        if (seam == weld_seam_geometry.end() || seam->second.type != 10U ||
+            !std::isfinite(seam->second.size) || seam->second.size <= 0.0)
+          continue;
+        const auto point_count = static_cast<std::size_t>(read_u32(tuple, count->offset));
+        if (point_count == 0U || point_count > 10U) {
+          invalid_weld_polygons.insert(polygon_id);
+          continue;
+        }
+        const auto retained_bytes = sizeof(WeldPolygonRow) + point_count * sizeof(Vector3d);
+        if (!geometry_budget.consume_decode_bytes(retained_bytes)) {
+          limited_weld_polygons.insert(polygon_id);
+          continue;
+        }
+        WeldPolygonRow decoded{.number = read_u32(tuple, number->offset), .type = polygon_type};
+        decoded.values.reserve(point_count);
+        bool complete = true;
+        for (std::size_t index = 1U; index <= point_count; ++index) {
+          const auto suffix = std::to_string(index);
+          const auto* x = find_field(schema, *polygons, "x" + suffix);
+          const auto* y = find_field(schema, *polygons, "y" + suffix);
+          const auto* z = find_field(schema, *polygons, "z" + suffix);
+          if (x == nullptr || y == nullptr || z == nullptr) {
+            complete = false;
+            break;
+          }
+          decoded.values.push_back({scalar(tuple, *x), scalar(tuple, *y), scalar(tuple, *z)});
+        }
+        if (!complete) {
+          invalid_weld_polygons.insert(polygon_id);
+          continue;
+        }
+        weld_polygon_rows[polygon_id].push_back(std::move(decoded));
+      }
+    }
+  }
+  std::unordered_map<std::uint32_t, std::size_t> weld_mesh_indices;
+  for (auto& [polygon_id, rows] : weld_polygon_rows) {
+    const auto owner = weld_polygon_owners.find(polygon_id);
+    if (owner == weld_polygon_owners.end()) continue;
+    if (limited_weld_polygons.contains(polygon_id)) {
+      diagnostics.push_back({ErrorCode::resource_limit, owner->second,
+                             "Polygon-weld rows exceed the aggregate geometry memory budget."});
+      continue;
+    }
+    std::sort(rows.begin(), rows.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.number < rhs.number; });
+    std::vector<Vector3d> values;
+    const auto polygon_type = rows.empty() ? 0U : rows.front().type;
+    bool valid = !rows.empty();
+    for (std::size_t index = 0U; index < rows.size(); ++index) {
+      valid = valid && rows[index].number == index && rows[index].type == polygon_type;
+      values.insert(values.end(), rows[index].values.begin(), rows[index].values.end());
+    }
+    if (invalid_weld_polygons.contains(polygon_id) || !valid) {
+      diagnostics.push_back({ErrorCode::invalid_geometry, owner->second,
+                             "Persisted polygon-weld rows are incomplete or out of sequence."});
+      continue;
+    }
+    const auto weld = weld_definitions.find(owner->second);
+    const auto seam_id =
+        polygon_type == 1U ? weld->second.above_attribute_id : weld->second.below_attribute_id;
+    const auto seam = weld_seam_geometry.find(seam_id);
+    const auto system = systems.find(owner->second);
+    if (seam == weld_seam_geometry.end() || system == systems.end() ||
+        !axes.contains(system->second.axes_id)) {
+      diagnostics.push_back({ErrorCode::decoder_unavailable, owner->second,
+                             "Polygon-weld seam or coordinate frame is unavailable."});
+      continue;
+    }
+    MeshData candidate{.object_id = owner->second};
+    if (!append_weld_fillet_sweep(candidate, values, seam->second.size, system->second,
+                                  axes.at(system->second.axes_id))) {
+      diagnostics.push_back({ErrorCode::invalid_geometry, owner->second,
+                             "Persisted polygon-weld path or frame is invalid."});
+      continue;
+    }
+    if (!geometry_budget.consume_mesh(candidate.positions.size(), candidate.indices.size())) {
+      diagnostics.push_back({ErrorCode::resource_limit, owner->second,
+                             "Polygon-weld mesh exceeds the aggregate geometry memory budget."});
+      continue;
+    }
+    const auto [found, inserted] = weld_mesh_indices.try_emplace(owner->second, meshes.size());
+    if (inserted) {
+      meshes.push_back(std::move(candidate));
+      continue;
+    }
+    auto& mesh = meshes[found->second];
+    const auto vertex_offset = static_cast<std::uint32_t>(mesh.positions.size() / 3U);
+    mesh.positions.insert(mesh.positions.end(), candidate.positions.begin(),
+                          candidate.positions.end());
+    for (const auto index : candidate.indices) mesh.indices.push_back(vertex_offset + index);
+  }
+  for (const auto polygon_id : invalid_weld_polygons) {
+    if (weld_polygon_rows.contains(polygon_id)) continue;
+    const auto owner = weld_polygon_owners.find(polygon_id);
+    if (owner != weld_polygon_owners.end()) {
+      diagnostics.push_back({ErrorCode::invalid_geometry, owner->second,
+                             "Persisted polygon-weld row has an invalid point count."});
+    }
+  }
+  for (const auto polygon_id : limited_weld_polygons) {
+    if (weld_polygon_rows.contains(polygon_id)) continue;
+    const auto owner = weld_polygon_owners.find(polygon_id);
+    if (owner != weld_polygon_owners.end()) {
+      diagnostics.push_back({ErrorCode::resource_limit, owner->second,
+                             "Polygon-weld rows exceed the aggregate geometry memory budget."});
     }
   }
 
