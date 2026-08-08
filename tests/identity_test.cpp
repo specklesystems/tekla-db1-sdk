@@ -90,6 +90,8 @@ enum class PolygonWeldFrameFixture {
   orthogonal,
   leg_parallel_to_tangent,
   reversed_handedness,
+  noisy_tangent_component,
+  collinear_model_basis,
 };
 
 void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schema& schema,
@@ -967,10 +969,20 @@ void append_polygon_weld_table(std::vector<std::byte>& bytes,
     append_tuple([&](std::span<std::byte> tuple) {
       for (const auto& field : schema.table_fields(table)) {
         if (field.name == "id") write_u32(tuple, field.offset, 901U);
-        if (field.name == "xdir_x") write_scalar(tuple, field, 0.0);
-        if (field.name == "xdir_y") write_scalar(tuple, field, 1.0);
+        if (field.name == "xdir_x") {
+          write_scalar(tuple, field,
+                       frame_fixture == PolygonWeldFrameFixture::collinear_model_basis ? 1.0 : 0.0);
+        }
+        if (field.name == "xdir_y") {
+          write_scalar(tuple, field,
+                       frame_fixture == PolygonWeldFrameFixture::collinear_model_basis ? 0.0 : 1.0);
+        }
         if (field.name == "xdir_z") write_scalar(tuple, field, 0.0);
-        if (field.name == "ydir_x") write_scalar(tuple, field, -1.0);
+        if (field.name == "ydir_x") {
+          write_scalar(
+              tuple, field,
+              frame_fixture == PolygonWeldFrameFixture::collinear_model_basis ? 1.0 : -1.0);
+        }
         if (field.name == "ydir_y") write_scalar(tuple, field, 0.0);
         if (field.name == "ydir_z") write_scalar(tuple, field, 0.0);
       }
@@ -1042,6 +1054,8 @@ void append_polygon_weld_table(std::vector<std::byte>& bytes,
             {static_cast<double>(polygon) * 20.0 + static_cast<double>(segment) * 10.0, 0.0, 0.0});
         path_values.push_back(frame_fixture == PolygonWeldFrameFixture::leg_parallel_to_tangent
                                   ? tekla::db1::Vector3d{1.0, 0.0, 0.0}
+                              : frame_fixture == PolygonWeldFrameFixture::noisy_tangent_component
+                                  ? tekla::db1::Vector3d{4.6e-5, 1.0, 0.0}
                               : frame_fixture == PolygonWeldFrameFixture::reversed_handedness
                                   ? tekla::db1::Vector3d{0.0, 0.0, 1.0}
                                   : tekla::db1::Vector3d{0.0, 1.0, 0.0});
@@ -1975,6 +1989,73 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     }
     CHECK(saw_outward_mesh,
           "a reversed polygon-weld frame is canonicalized to nondegenerate outward faces");
+  }
+
+  const auto noisy_frame_weld_bytes = database_with_polygon_weld_geometry(
+      false, false, PolygonWeldFrameFixture::noisy_tangent_component);
+  ModelPackage noisy_frame_weld_package;
+  noisy_frame_weld_package.add(Asset::copy(AssetRole::model_database,
+                                           "noisy-frame-polygon-weld.db1", noisy_frame_weld_bytes));
+  auto noisy_frame_weld_model = open(std::move(noisy_frame_weld_package));
+  CHECK(noisy_frame_weld_model.has_value(), "a noisy-frame polygon-weld database opens");
+  if (noisy_frame_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = noisy_frame_weld_model.value().process(request);
+    CHECK(processed.has_value(), "noisy-frame polygon-weld processing is available");
+    bool saw_projected_mesh = false;
+    bool saw_object_diagnostic = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "noisy-frame polygon-weld batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          saw_projected_mesh =
+              saw_projected_mesh || (mesh.object_id == 1201U && mesh.positions.size() == 18U &&
+                                     mesh.indices.size() == 24U);
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_object_diagnostic = saw_object_diagnostic || diagnostic.object_id == 1201U;
+        }
+      }
+    }
+    CHECK(saw_projected_mesh && !saw_object_diagnostic,
+          "a persisted weld leg with a 4.6e-5 tangent cosine is projected into the segment plane");
+  }
+
+  const auto collinear_basis_weld_bytes = database_with_polygon_weld_geometry(
+      false, false, PolygonWeldFrameFixture::collinear_model_basis);
+  ModelPackage collinear_basis_weld_package;
+  collinear_basis_weld_package.add(Asset::copy(
+      AssetRole::model_database, "collinear-basis-polygon-weld.db1", collinear_basis_weld_bytes));
+  auto collinear_basis_weld_model = open(std::move(collinear_basis_weld_package));
+  CHECK(collinear_basis_weld_model.has_value(), "a collinear-basis polygon-weld database opens");
+  if (collinear_basis_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = collinear_basis_weld_model.value().process(request);
+    CHECK(processed.has_value(), "collinear-basis polygon-weld processing remains object-scoped");
+    bool emitted_mesh = false;
+    bool saw_invalid_geometry = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "collinear-basis polygon-weld batches fail open");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          emitted_mesh = emitted_mesh || mesh.object_id == 1201U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_invalid_geometry =
+              saw_invalid_geometry ||
+              (diagnostic.object_id == 1201U && diagnostic.code == ErrorCode::invalid_geometry &&
+               diagnostic.message.find("polygon-weld") != std::string_view::npos);
+        }
+      }
+    }
+    CHECK(!emitted_mesh && saw_invalid_geometry,
+          "a polygon-weld with a collinear model coordinate basis is rejected before meshing");
   }
 
   const auto malformed_polygon_weld_bytes = database_with_polygon_weld_geometry(true);

@@ -1183,33 +1183,77 @@ struct WeldFilletFrame {
                                                                Vector3d second_value,
                                                                Vector3d start,
                                                                Vector3d end) noexcept {
-  auto first = normalized(first_value);
-  auto second = normalized(second_value);
   const auto tangent = normalized(subtract(end, start));
-  if (!first || !second || !tangent || std::abs(dot(*first, *tangent)) > 1.0e-6 ||
-      std::abs(dot(*second, *tangent)) > 1.0e-6 ||
-      std::abs(std::abs(dot(cross(*first, *second), *tangent)) - 1.0) > 1.0e-6) {
+  if (!tangent) return std::nullopt;
+  const auto project_leg = [&](Vector3d value) -> std::optional<Vector3d> {
+    const double source_length = vector_length(value);
+    if (!std::isfinite(source_length) || source_length <= 1.0e-12) return std::nullopt;
+    const auto projected = subtract(value, scale(*tangent, dot(value, *tangent)));
+    const double projected_length = vector_length(projected);
+    if (!std::isfinite(projected_length) || projected_length <= source_length * 1.0e-9) {
+      return std::nullopt;
+    }
+    return scale(projected, 1.0 / projected_length);
+  };
+  auto first = project_leg(first_value);
+  auto second = project_leg(second_value);
+  if (!first || !second || std::abs(vector_length(cross(*first, *second)) - 1.0) > 1.0e-6) {
     return std::nullopt;
   }
   if (dot(cross(*first, *second), *tangent) < 0.0) std::swap(first, second);
   return WeldFilletFrame{*first, *second};
 }
 
-[[nodiscard]] bool valid_weld_ring(Vector3d origin, const WeldFilletFrame& frame, double size,
-                                   const CoordinateSystem& system,
-                                   const Axes& system_axes) noexcept {
+[[nodiscard]] std::optional<std::array<Vector3d, 3>> model_weld_ring(
+    Vector3d origin, const WeldFilletFrame& frame, double size, const CoordinateSystem& system,
+    const Axes& system_axes) noexcept {
   const std::array<Vector3d, 3> ring{
       origin,
       add(origin, scale(frame.first, size)),
       add(origin, scale(frame.second, size)),
   };
-  return std::all_of(ring.begin(), ring.end(), [&](Vector3d local) {
+  std::array<Vector3d, 3> model_ring;
+  for (std::size_t index = 0U; index < ring.size(); ++index) {
+    const auto local = ring[index];
     const auto model = transform(local, system, system_axes);
-    return std::isfinite(model.x) && std::isfinite(model.y) && std::isfinite(model.z) &&
-           std::abs(model.x) <= std::numeric_limits<float>::max() &&
-           std::abs(model.y) <= std::numeric_limits<float>::max() &&
-           std::abs(model.z) <= std::numeric_limits<float>::max();
-  });
+    if (!std::isfinite(model.x) || !std::isfinite(model.y) || !std::isfinite(model.z) ||
+        std::abs(model.x) > std::numeric_limits<float>::max() ||
+        std::abs(model.y) > std::numeric_limits<float>::max() ||
+        std::abs(model.z) > std::numeric_limits<float>::max()) {
+      return std::nullopt;
+    }
+    model_ring[index] = model;
+  }
+  return model_ring;
+}
+
+[[nodiscard]] bool valid_model_triangle(Vector3d first, Vector3d second, Vector3d third) noexcept {
+  const auto first_edge = subtract(second, first);
+  const auto second_edge = subtract(third, first);
+  const double first_length = vector_length(first_edge);
+  const double second_length = vector_length(second_edge);
+  if (!std::isfinite(first_length) || !std::isfinite(second_length) || first_length <= 1.0e-12 ||
+      second_length <= 1.0e-12) {
+    return false;
+  }
+  const double doubled_area = vector_length(cross(first_edge, second_edge));
+  return std::isfinite(doubled_area) && doubled_area > first_length * second_length * 1.0e-9;
+}
+
+[[nodiscard]] bool valid_model_ring(const std::array<Vector3d, 3>& ring) noexcept {
+  return valid_model_triangle(ring[0], ring[1], ring[2]);
+}
+
+[[nodiscard]] bool valid_weld_sides(const std::array<Vector3d, 3>& first_ring,
+                                    const std::array<Vector3d, 3>& second_ring) noexcept {
+  for (std::size_t side = 0U; side < first_ring.size(); ++side) {
+    const auto adjacent = (side + 1U) % first_ring.size();
+    if (!valid_model_triangle(first_ring[side], first_ring[adjacent], second_ring[adjacent]) ||
+        !valid_model_triangle(first_ring[side], second_ring[adjacent], second_ring[side])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 [[nodiscard]] std::optional<WeldFilletSweepPlan> plan_weld_fillet_sweep(
@@ -1242,16 +1286,26 @@ struct WeldFilletFrame {
   WeldPolygonValueCursor cursor(rows);
   auto origin = cursor.next();
   if (!origin) return std::nullopt;
+  std::optional<std::array<Vector3d, 3>> previous_ring;
   for (std::size_t segment = 0U; segment < segment_count; ++segment) {
     const auto first = cursor.next();
     const auto second = cursor.next();
     const auto end = cursor.next();
     if (!first || !second || !end) return std::nullopt;
     const auto frame = weld_fillet_frame(*first, *second, *origin, *end);
-    if (!frame || !valid_weld_ring(*origin, *frame, size, system, system_axes) ||
-        (segment + 1U == segment_count &&
-         !valid_weld_ring(*end, *frame, size, system, system_axes))) {
+    if (!frame) return std::nullopt;
+    const auto current_ring = model_weld_ring(*origin, *frame, size, system, system_axes);
+    if (!current_ring || !valid_model_ring(*current_ring) ||
+        (previous_ring && !valid_weld_sides(*previous_ring, *current_ring))) {
       return std::nullopt;
+    }
+    previous_ring = current_ring;
+    if (segment + 1U == segment_count) {
+      const auto end_ring = model_weld_ring(*end, *frame, size, system, system_axes);
+      if (!end_ring || !valid_model_ring(*end_ring) ||
+          !valid_weld_sides(*current_ring, *end_ring)) {
+        return std::nullopt;
+      }
     }
     origin = end;
   }
