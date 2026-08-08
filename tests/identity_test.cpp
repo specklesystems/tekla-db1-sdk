@@ -86,6 +86,12 @@ enum class PartFrameFixture {
   rotated,
 };
 
+enum class PolygonWeldFrameFixture {
+  orthogonal,
+  leg_parallel_to_tangent,
+  reversed_handedness,
+};
+
 void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schema& schema,
                   const tekla::db1::detail::TableSchema& table, bool final,
                   std::string_view profile = "200*10", std::string_view object_class = "14",
@@ -916,7 +922,9 @@ std::vector<std::byte> database_with_one_object(
 void append_polygon_weld_table(std::vector<std::byte>& bytes,
                                const tekla::db1::detail::Schema& schema,
                                const tekla::db1::detail::TableSchema& table, bool final,
-                               bool malformed_polygon, bool semantic_only) {
+                               bool malformed_polygon, bool semantic_only,
+                               PolygonWeldFrameFixture frame_fixture, std::size_t polygon_count,
+                               std::size_t polygon_row_count) {
   constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
                                                std::byte{0xdb}};
   constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
@@ -1011,37 +1019,62 @@ void append_polygon_weld_table(std::vector<std::byte>& bytes,
       }
     });
   } else if (table.name == "relation") {
-    append_tuple([&](std::span<std::byte> tuple) {
-      for (const auto& field : schema.table_fields(table)) {
-        if (field.name == "id") write_u32(tuple, field.offset, 951U);
-        if (field.name == "type") write_u32(tuple, field.offset, 40'001U);
-        if (field.name == "id1") write_u32(tuple, field.offset, 1201U);
-        if (field.name == "id2") write_u32(tuple, field.offset, 950U);
-      }
-    });
+    for (std::size_t polygon = 0U; polygon < polygon_count; ++polygon) {
+      const auto polygon_id = static_cast<std::uint32_t>(950U + polygon);
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, polygon_id + 1U);
+          if (field.name == "type") write_u32(tuple, field.offset, 40'001U);
+          if (field.name == "id1") write_u32(tuple, field.offset, 1201U);
+          if (field.name == "id2") write_u32(tuple, field.offset, polygon_id);
+        }
+      });
+    }
   } else if (table.name == "weldingpolygon") {
-    append_tuple([&](std::span<std::byte> tuple) {
-      constexpr std::array<tekla::db1::Vector3d, 4> points{{
-          {0.0, 0.0, 0.0},
-          {0.0, 1.0, 0.0},
-          {0.0, 0.0, 1.0},
-          {10.0, 0.0, 0.0},
-      }};
-      for (const auto& field : schema.table_fields(table)) {
-        if (field.name == "id") write_u32(tuple, field.offset, 950U);
-        if (field.name == "no") write_u32(tuple, field.offset, 0U);
-        if (field.name == "number_of_points_in_row") {
-          write_u32(tuple, field.offset, malformed_polygon ? 5U : 4U);
-        }
-        if (field.name == "type") write_u32(tuple, field.offset, 1U);
-        for (std::size_t index = 0; index < points.size(); ++index) {
-          const auto suffix = std::to_string(index + 1U);
-          if (field.name == "x" + suffix) write_scalar(tuple, field, points[index].x);
-          if (field.name == "y" + suffix) write_scalar(tuple, field, points[index].y);
-          if (field.name == "z" + suffix) write_scalar(tuple, field, points[index].z);
-        }
+    for (std::size_t polygon = 0U; polygon < polygon_count; ++polygon) {
+      const auto polygon_id = static_cast<std::uint32_t>(950U + polygon);
+      const auto value_count = polygon_row_count * 4U;
+      const auto segment_count = (value_count - 1U) / 3U;
+      std::vector<tekla::db1::Vector3d> path_values;
+      path_values.reserve(segment_count * 3U + 1U);
+      for (std::size_t segment = 0U; segment < segment_count; ++segment) {
+        path_values.push_back(
+            {static_cast<double>(polygon) * 20.0 + static_cast<double>(segment) * 10.0, 0.0, 0.0});
+        path_values.push_back(frame_fixture == PolygonWeldFrameFixture::leg_parallel_to_tangent
+                                  ? tekla::db1::Vector3d{1.0, 0.0, 0.0}
+                              : frame_fixture == PolygonWeldFrameFixture::reversed_handedness
+                                  ? tekla::db1::Vector3d{0.0, 0.0, 1.0}
+                                  : tekla::db1::Vector3d{0.0, 1.0, 0.0});
+        path_values.push_back(frame_fixture == PolygonWeldFrameFixture::reversed_handedness
+                                  ? tekla::db1::Vector3d{0.0, 1.0, 0.0}
+                                  : tekla::db1::Vector3d{0.0, 0.0, 1.0});
       }
-    });
+      path_values.push_back(
+          {static_cast<double>(polygon) * 20.0 + static_cast<double>(segment_count) * 10.0, 0.0,
+           0.0});
+      CHECK(path_values.size() == value_count,
+            "the polygon-weld row fixture forms complete segment triples");
+      for (std::size_t row = 0U; row < polygon_row_count; ++row) {
+        append_tuple([&](std::span<std::byte> tuple) {
+          const auto points =
+              std::span<const tekla::db1::Vector3d>(path_values).subspan(row * 4U, 4U);
+          for (const auto& field : schema.table_fields(table)) {
+            if (field.name == "id") write_u32(tuple, field.offset, polygon_id);
+            if (field.name == "no") write_u32(tuple, field.offset, static_cast<std::uint32_t>(row));
+            if (field.name == "number_of_points_in_row") {
+              write_u32(tuple, field.offset, malformed_polygon ? 5U : 4U);
+            }
+            if (field.name == "type") write_u32(tuple, field.offset, 1U);
+            for (std::size_t index = 0; index < points.size(); ++index) {
+              const auto suffix = std::to_string(index + 1U);
+              if (field.name == "x" + suffix) write_scalar(tuple, field, points[index].x);
+              if (field.name == "y" + suffix) write_scalar(tuple, field, points[index].y);
+              if (field.name == "z" + suffix) write_scalar(tuple, field, points[index].z);
+            }
+          }
+        });
+      }
+    }
   }
 
   bytes.push_back(std::byte{0});
@@ -1052,8 +1085,10 @@ void append_polygon_weld_table(std::vector<std::byte>& bytes,
   }
 }
 
-std::vector<std::byte> database_with_polygon_weld_geometry(bool malformed_polygon = false,
-                                                           bool semantic_only = false) {
+std::vector<std::byte> database_with_polygon_weld_geometry(
+    bool malformed_polygon = false, bool semantic_only = false,
+    PolygonWeldFrameFixture frame_fixture = PolygonWeldFrameFixture::orthogonal,
+    std::size_t polygon_count = 1U, std::size_t polygon_row_count = 1U) {
   constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
                                                std::byte{0xdb}};
   constexpr std::string_view format = "9.66";
@@ -1072,7 +1107,7 @@ std::vector<std::byte> database_with_polygon_weld_geometry(bool malformed_polygo
     for (std::size_t index = 0; index < schema->tables.size(); ++index) {
       append_polygon_weld_table(bytes, *schema, schema->tables[index],
                                 index + 1U == schema->tables.size(), malformed_polygon,
-                                semantic_only);
+                                semantic_only, frame_fixture, polygon_count, polygon_row_count);
     }
   }
   return bytes;
@@ -1853,6 +1888,95 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
           "polygon storage IDs remain internal and do not become display owners");
   }
 
+  const auto parallel_leg_weld_bytes = database_with_polygon_weld_geometry(
+      false, false, PolygonWeldFrameFixture::leg_parallel_to_tangent);
+  ModelPackage parallel_leg_weld_package;
+  parallel_leg_weld_package.add(Asset::copy(
+      AssetRole::model_database, "parallel-leg-polygon-weld.db1", parallel_leg_weld_bytes));
+  auto parallel_leg_weld_model = open(std::move(parallel_leg_weld_package));
+  CHECK(parallel_leg_weld_model.has_value(), "a parallel-leg polygon-weld database opens");
+  if (parallel_leg_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = parallel_leg_weld_model.value().process(request);
+    CHECK(processed.has_value(), "parallel-leg polygon-weld processing remains object-scoped");
+    bool emitted_mesh = false;
+    bool saw_invalid_geometry = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "parallel-leg polygon-weld batches fail open");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          emitted_mesh = emitted_mesh || mesh.object_id == 1201U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_invalid_geometry =
+              saw_invalid_geometry ||
+              (diagnostic.object_id == 1201U && diagnostic.code == ErrorCode::invalid_geometry &&
+               diagnostic.message.find("polygon-weld") != std::string_view::npos);
+        }
+      }
+    }
+    CHECK(
+        !emitted_mesh && saw_invalid_geometry,
+        "a polygon-weld leg parallel to its segment tangent is rejected with an object diagnostic");
+  }
+
+  const auto reversed_frame_weld_bytes = database_with_polygon_weld_geometry(
+      false, false, PolygonWeldFrameFixture::reversed_handedness);
+  ModelPackage reversed_frame_weld_package;
+  reversed_frame_weld_package.add(Asset::copy(
+      AssetRole::model_database, "reversed-frame-polygon-weld.db1", reversed_frame_weld_bytes));
+  auto reversed_frame_weld_model = open(std::move(reversed_frame_weld_package));
+  CHECK(reversed_frame_weld_model.has_value(), "a reversed-frame polygon-weld database opens");
+  if (reversed_frame_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = reversed_frame_weld_model.value().process(request);
+    CHECK(processed.has_value(), "reversed-frame polygon-weld processing is available");
+    bool saw_outward_mesh = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "reversed-frame polygon-weld batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          if (mesh.object_id != 1201U) continue;
+          double signed_volume = 0.0;
+          bool nondegenerate = true;
+          for (std::size_t index = 0U; index + 2U < mesh.indices.size(); index += 3U) {
+            const auto vertex = [&](std::uint32_t vertex_index) {
+              const auto offset = static_cast<std::size_t>(vertex_index) * 3U;
+              return std::array<double, 3>{mesh.positions[offset], mesh.positions[offset + 1U],
+                                           mesh.positions[offset + 2U]};
+            };
+            const auto first = vertex(mesh.indices[index]);
+            const auto second = vertex(mesh.indices[index + 1U]);
+            const auto third = vertex(mesh.indices[index + 2U]);
+            const std::array<double, 3> edge_a{second[0] - first[0], second[1] - first[1],
+                                               second[2] - first[2]};
+            const std::array<double, 3> edge_b{third[0] - first[0], third[1] - first[1],
+                                               third[2] - first[2]};
+            const std::array<double, 3> normal{edge_a[1] * edge_b[2] - edge_a[2] * edge_b[1],
+                                               edge_a[2] * edge_b[0] - edge_a[0] * edge_b[2],
+                                               edge_a[0] * edge_b[1] - edge_a[1] * edge_b[0]};
+            nondegenerate =
+                nondegenerate &&
+                (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2] > 1.0e-12);
+            signed_volume += (first[0] * (second[1] * third[2] - second[2] * third[1]) +
+                              first[1] * (second[2] * third[0] - second[0] * third[2]) +
+                              first[2] * (second[0] * third[1] - second[1] * third[0])) /
+                             6.0;
+          }
+          saw_outward_mesh = nondegenerate && signed_volume > 1.0e-9;
+        }
+      }
+    }
+    CHECK(saw_outward_mesh,
+          "a reversed polygon-weld frame is canonicalized to nondegenerate outward faces");
+  }
+
   const auto malformed_polygon_weld_bytes = database_with_polygon_weld_geometry(true);
   ModelPackage malformed_polygon_weld_package;
   malformed_polygon_weld_package.add(Asset::copy(
@@ -1917,6 +2041,77 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     }
     CHECK(!emitted_mesh && saw_resource_limit,
           "polygon-weld retained rows and meshes honor the aggregate geometry budget");
+  }
+
+  const auto merged_polygon_weld_bytes =
+      database_with_polygon_weld_geometry(false, false, PolygonWeldFrameFixture::orthogonal, 2U);
+  ModelPackage merged_polygon_weld_package;
+  merged_polygon_weld_package.add(
+      Asset::copy(AssetRole::model_database, "merged-polygon-weld.db1", merged_polygon_weld_bytes));
+  auto merged_polygon_weld_model = open(std::move(merged_polygon_weld_package));
+  CHECK(merged_polygon_weld_model.has_value(), "a two-polygon single-weld database opens");
+  if (merged_polygon_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    request.geometry_memory_budget_bytes = 648U;
+    auto processed = merged_polygon_weld_model.value().process(request);
+    CHECK(processed.has_value(), "two-polygon weld processing honors its tight budget");
+    std::size_t weld_meshes = 0U;
+    bool saw_complete_mesh = false;
+    bool saw_resource_limit = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "two-polygon weld batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          if (mesh.object_id != 1201U) continue;
+          ++weld_meshes;
+          saw_complete_mesh = mesh.positions.size() == 36U && mesh.indices.size() == 48U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_resource_limit = saw_resource_limit || (diagnostic.object_id == 1201U &&
+                                                      diagnostic.code == ErrorCode::resource_limit);
+        }
+      }
+    }
+    CHECK(weld_meshes == 1U && saw_complete_mesh && !saw_resource_limit,
+          "merged polygon geometry charges one MeshData overhead for its weld owner");
+  }
+
+  const auto many_row_weld_bytes = database_with_polygon_weld_geometry(
+      false, false, PolygonWeldFrameFixture::orthogonal, 1U, 4U);
+  ModelPackage many_row_weld_package;
+  many_row_weld_package.add(
+      Asset::copy(AssetRole::model_database, "many-row-polygon-weld.db1", many_row_weld_bytes));
+  auto many_row_weld_model = open(std::move(many_row_weld_package));
+  CHECK(many_row_weld_model.has_value(), "a many-row polygon-weld database opens");
+  if (many_row_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    request.geometry_memory_budget_bytes = 1168U;
+    auto processed = many_row_weld_model.value().process(request);
+    CHECK(processed.has_value(), "many-row polygon-weld processing honors its tight budget");
+    bool saw_complete_mesh = false;
+    bool saw_resource_limit = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "many-row polygon-weld batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          saw_complete_mesh =
+              saw_complete_mesh || (mesh.object_id == 1201U && mesh.positions.size() == 54U &&
+                                    mesh.indices.size() == 96U);
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_resource_limit = saw_resource_limit || (diagnostic.object_id == 1201U &&
+                                                      diagnostic.code == ErrorCode::resource_limit);
+        }
+      }
+    }
+    CHECK(saw_complete_mesh && !saw_resource_limit,
+          "many-row weld paths need no unbudgeted flattened-value allocation");
   }
 
   const auto semantic_only_weld_bytes = database_with_polygon_weld_geometry(false, true);

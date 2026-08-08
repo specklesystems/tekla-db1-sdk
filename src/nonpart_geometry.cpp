@@ -150,14 +150,15 @@ class RetainedGeometryBudget {
     return bytes && consume(*bytes);
   }
 
-  [[nodiscard]] bool can_consume_mesh(std::size_t position_count,
-                                      std::size_t index_count) const noexcept {
-    const auto bytes = mesh_bytes(position_count, index_count);
+  [[nodiscard]] bool can_consume_mesh(std::size_t position_count, std::size_t index_count,
+                                      bool include_record = true) const noexcept {
+    const auto bytes = mesh_bytes(position_count, index_count, include_record);
     return bytes && *bytes <= remaining();
   }
 
-  [[nodiscard]] bool consume_mesh(std::size_t position_count, std::size_t index_count) noexcept {
-    const auto bytes = mesh_bytes(position_count, index_count);
+  [[nodiscard]] bool consume_mesh(std::size_t position_count, std::size_t index_count,
+                                  bool include_record = true) noexcept {
+    const auto bytes = mesh_bytes(position_count, index_count, include_record);
     return bytes && consume(*bytes);
   }
 
@@ -190,12 +191,15 @@ class RetainedGeometryBudget {
   }
 
   [[nodiscard]] static std::optional<std::size_t> mesh_bytes(std::size_t position_count,
-                                                             std::size_t index_count) noexcept {
+                                                             std::size_t index_count,
+                                                             bool include_record) noexcept {
     const auto positions = checked_product(position_count, sizeof(float));
     const auto indices = checked_product(index_count, sizeof(std::uint32_t));
     if (!positions || !indices) return std::nullopt;
     const auto arrays = checked_sum(*positions, *indices);
-    return arrays ? checked_sum(sizeof(MeshData), *arrays) : std::nullopt;
+    return !arrays          ? std::nullopt
+           : include_record ? checked_sum(sizeof(MeshData), *arrays)
+                            : arrays;
   }
 
   [[nodiscard]] std::size_t remaining() const noexcept { return limit_ - used_; }
@@ -288,6 +292,10 @@ struct BoltDisplayAttribute {
 [[nodiscard]] Vector3d cross(Vector3d lhs, Vector3d rhs) noexcept {
   return {lhs.y * rhs.z - lhs.z * rhs.y, lhs.z * rhs.x - lhs.x * rhs.z,
           lhs.x * rhs.y - lhs.y * rhs.x};
+}
+
+[[nodiscard]] double dot(Vector3d lhs, Vector3d rhs) noexcept {
+  return lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z;
 }
 
 [[nodiscard]] std::optional<Vector3d> normalized(Vector3d value) noexcept {
@@ -1140,58 +1148,153 @@ void append_cylinder(MeshData& mesh, Vector3d start, Vector3d end, double radius
   append_prism(mesh, start, end, *first, cross(*axis, *first), radius, facets);
 }
 
-[[nodiscard]] bool append_weld_fillet_sweep(MeshData& mesh, std::span<const Vector3d> values,
-                                            double size, const CoordinateSystem& system,
-                                            const Axes& system_axes) {
-  if (values.size() < 4U || (values.size() - 1U) % 3U != 0U || !std::isfinite(size) || size <= 0.0)
-    return false;
-  const auto segment_count = (values.size() - 1U) / 3U;
-  if (segment_count == 0U || segment_count > (std::numeric_limits<std::uint32_t>::max() / 3U) - 1U)
-    return false;
-  for (std::size_t segment = 0U; segment < segment_count; ++segment) {
-    const auto first = normalized(values[segment * 3U + 1U]);
-    const auto second = normalized(values[segment * 3U + 2U]);
-    const auto length = vector_length(subtract(values[(segment + 1U) * 3U], values[segment * 3U]));
-    if (!first || !second || !std::isfinite(length) || length <= 1.0e-9 ||
-        std::abs(vector_length(cross(*first, *second)) - 1.0) > 1.0e-6)
-      return false;
+class WeldPolygonValueCursor {
+ public:
+  explicit WeldPolygonValueCursor(std::span<const WeldPolygonRow> rows) : rows_(rows) {}
+
+  [[nodiscard]] std::optional<Vector3d> next() noexcept {
+    while (row_ < rows_.size() && value_ == rows_[row_].values.size()) {
+      ++row_;
+      value_ = 0U;
+    }
+    if (row_ == rows_.size()) return std::nullopt;
+    return rows_[row_].values[value_++];
   }
 
+ private:
+  std::span<const WeldPolygonRow> rows_;
+  std::size_t row_ = 0U;
+  std::size_t value_ = 0U;
+};
+
+struct WeldFilletSweepPlan {
+  std::size_t segment_count = 0U;
+  std::size_t position_growth = 0U;
+  std::size_t index_growth = 0U;
+  std::uint32_t first_vertex = 0U;
+};
+
+struct WeldFilletFrame {
+  Vector3d first;
+  Vector3d second;
+};
+
+[[nodiscard]] std::optional<WeldFilletFrame> weld_fillet_frame(Vector3d first_value,
+                                                               Vector3d second_value,
+                                                               Vector3d start,
+                                                               Vector3d end) noexcept {
+  auto first = normalized(first_value);
+  auto second = normalized(second_value);
+  const auto tangent = normalized(subtract(end, start));
+  if (!first || !second || !tangent || std::abs(dot(*first, *tangent)) > 1.0e-6 ||
+      std::abs(dot(*second, *tangent)) > 1.0e-6 ||
+      std::abs(std::abs(dot(cross(*first, *second), *tangent)) - 1.0) > 1.0e-6) {
+    return std::nullopt;
+  }
+  if (dot(cross(*first, *second), *tangent) < 0.0) std::swap(first, second);
+  return WeldFilletFrame{*first, *second};
+}
+
+[[nodiscard]] bool valid_weld_ring(Vector3d origin, const WeldFilletFrame& frame, double size,
+                                   const CoordinateSystem& system,
+                                   const Axes& system_axes) noexcept {
+  const std::array<Vector3d, 3> ring{
+      origin,
+      add(origin, scale(frame.first, size)),
+      add(origin, scale(frame.second, size)),
+  };
+  return std::all_of(ring.begin(), ring.end(), [&](Vector3d local) {
+    const auto model = transform(local, system, system_axes);
+    return std::isfinite(model.x) && std::isfinite(model.y) && std::isfinite(model.z) &&
+           std::abs(model.x) <= std::numeric_limits<float>::max() &&
+           std::abs(model.y) <= std::numeric_limits<float>::max() &&
+           std::abs(model.z) <= std::numeric_limits<float>::max();
+  });
+}
+
+[[nodiscard]] std::optional<WeldFilletSweepPlan> plan_weld_fillet_sweep(
+    const MeshData& mesh, std::span<const WeldPolygonRow> rows, double size,
+    const CoordinateSystem& system, const Axes& system_axes) {
+  if (!std::isfinite(size) || size <= 0.0) return std::nullopt;
+  std::size_t value_count = 0U;
+  for (const auto& row : rows) {
+    if (row.values.size() > std::numeric_limits<std::size_t>::max() - value_count) {
+      return std::nullopt;
+    }
+    value_count += row.values.size();
+  }
+  if (value_count < 4U || (value_count - 1U) % 3U != 0U) return std::nullopt;
+  const auto segment_count = (value_count - 1U) / 3U;
+  if (segment_count == 0U || segment_count > (std::numeric_limits<std::size_t>::max() / 9U) - 1U ||
+      segment_count > (std::numeric_limits<std::size_t>::max() - 6U) / 18U) {
+    return std::nullopt;
+  }
   const auto position_growth = (segment_count + 1U) * 9U;
   const auto index_growth = segment_count * 18U + 6U;
   if (position_growth > mesh.positions.max_size() - mesh.positions.size() ||
-      index_growth > mesh.indices.max_size() - mesh.indices.size())
-    return false;
-  mesh.positions.reserve(mesh.positions.size() + position_growth);
-  mesh.indices.reserve(mesh.indices.size() + index_growth);
-
-  const auto first_vertex = static_cast<std::uint32_t>(mesh.positions.size() / 3U);
-  for (std::size_t point = 0U; point <= segment_count; ++point) {
-    const auto frame = std::min(point, segment_count - 1U);
-    const auto first = normalized(values[frame * 3U + 1U]);
-    const auto second = normalized(values[frame * 3U + 2U]);
-    if (!first || !second || std::abs(vector_length(cross(*first, *second)) - 1.0) > 1.0e-6)
-      return false;
-    const auto origin = values[point * 3U];
-    const std::array<Vector3d, 3> ring{
-        origin,
-        add(origin, scale(*first, size)),
-        add(origin, scale(*second, size)),
-    };
-    for (const auto local : ring) {
-      const auto model = transform(local, system, system_axes);
-      if (!std::isfinite(model.x) || !std::isfinite(model.y) || !std::isfinite(model.z) ||
-          std::abs(model.x) > std::numeric_limits<float>::max() ||
-          std::abs(model.y) > std::numeric_limits<float>::max() ||
-          std::abs(model.z) > std::numeric_limits<float>::max())
-        return false;
-      mesh.positions.insert(
-          mesh.positions.end(),
-          {static_cast<float>(model.x), static_cast<float>(model.y), static_cast<float>(model.z)});
-    }
+      index_growth > mesh.indices.max_size() - mesh.indices.size()) {
+    return std::nullopt;
   }
-  for (std::uint32_t segment = 0U; segment < segment_count; ++segment) {
-    const auto current = first_vertex + segment * 3U;
+  const auto first_vertex =
+      checked_indexed_mesh_append_base(mesh.positions.size(), position_growth);
+  if (!first_vertex) return std::nullopt;
+
+  WeldPolygonValueCursor cursor(rows);
+  auto origin = cursor.next();
+  if (!origin) return std::nullopt;
+  for (std::size_t segment = 0U; segment < segment_count; ++segment) {
+    const auto first = cursor.next();
+    const auto second = cursor.next();
+    const auto end = cursor.next();
+    if (!first || !second || !end) return std::nullopt;
+    const auto frame = weld_fillet_frame(*first, *second, *origin, *end);
+    if (!frame || !valid_weld_ring(*origin, *frame, size, system, system_axes) ||
+        (segment + 1U == segment_count &&
+         !valid_weld_ring(*end, *frame, size, system, system_axes))) {
+      return std::nullopt;
+    }
+    origin = end;
+  }
+  if (cursor.next()) return std::nullopt;
+  return WeldFilletSweepPlan{segment_count, position_growth, index_growth, *first_vertex};
+}
+
+void append_weld_ring(MeshData& mesh, Vector3d origin, const WeldFilletFrame& frame, double size,
+                      const CoordinateSystem& system, const Axes& system_axes) {
+  const std::array<Vector3d, 3> ring{
+      origin,
+      add(origin, scale(frame.first, size)),
+      add(origin, scale(frame.second, size)),
+  };
+  for (const auto local : ring) {
+    const auto model = transform(local, system, system_axes);
+    mesh.positions.insert(
+        mesh.positions.end(),
+        {static_cast<float>(model.x), static_cast<float>(model.y), static_cast<float>(model.z)});
+  }
+}
+
+void append_weld_fillet_sweep(MeshData& mesh, std::span<const WeldPolygonRow> rows, double size,
+                              const CoordinateSystem& system, const Axes& system_axes,
+                              const WeldFilletSweepPlan& plan) {
+  mesh.positions.reserve(mesh.positions.size() + plan.position_growth);
+  mesh.indices.reserve(mesh.indices.size() + plan.index_growth);
+
+  WeldPolygonValueCursor cursor(rows);
+  auto origin = *cursor.next();
+  for (std::size_t segment = 0U; segment < plan.segment_count; ++segment) {
+    const auto first = *cursor.next();
+    const auto second = *cursor.next();
+    const auto end = *cursor.next();
+    const auto frame = *weld_fillet_frame(first, second, origin, end);
+    append_weld_ring(mesh, origin, frame, size, system, system_axes);
+    if (segment + 1U == plan.segment_count) {
+      append_weld_ring(mesh, end, frame, size, system, system_axes);
+    }
+    origin = end;
+  }
+  for (std::size_t segment = 0U; segment < plan.segment_count; ++segment) {
+    const auto current = plan.first_vertex + static_cast<std::uint32_t>(segment * 3U);
     const auto next = current + 3U;
     for (std::uint32_t side = 0U; side < 3U; ++side) {
       const auto adjacent = (side + 1U) % 3U;
@@ -1199,10 +1302,9 @@ void append_cylinder(MeshData& mesh, Vector3d start, Vector3d end, double radius
                                                current + side, next + adjacent, next + side});
     }
   }
-  const auto last = first_vertex + static_cast<std::uint32_t>(segment_count) * 3U;
-  mesh.indices.insert(mesh.indices.end(), {first_vertex, first_vertex + 2U, first_vertex + 1U, last,
-                                           last + 1U, last + 2U});
-  return true;
+  const auto last = plan.first_vertex + static_cast<std::uint32_t>(plan.segment_count * 3U);
+  mesh.indices.insert(mesh.indices.end(), {plan.first_vertex, plan.first_vertex + 2U,
+                                           plan.first_vertex + 1U, last, last + 1U, last + 2U});
 }
 
 class NonPartReader final : public BatchReader {
@@ -1267,6 +1369,20 @@ class NonPartReader final : public BatchReader {
 };
 
 }  // namespace
+
+std::optional<std::uint32_t> checked_indexed_mesh_append_base(
+    std::size_t existing_position_count, std::size_t appended_position_count) noexcept {
+  if (existing_position_count % 3U != 0U || appended_position_count % 3U != 0U) {
+    return std::nullopt;
+  }
+  const auto existing_vertices = existing_position_count / 3U;
+  const auto appended_vertices = appended_position_count / 3U;
+  constexpr auto maximum = std::numeric_limits<std::uint32_t>::max();
+  if (existing_vertices > maximum || appended_vertices > maximum - existing_vertices) {
+    return std::nullopt;
+  }
+  return static_cast<std::uint32_t>(existing_vertices);
+}
 
 std::optional<FastenerDimensions> known_fastener_dimensions(std::string_view standard,
                                                             double diameter) noexcept {
@@ -1717,12 +1833,10 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
     }
     std::sort(rows.begin(), rows.end(),
               [](const auto& lhs, const auto& rhs) { return lhs.number < rhs.number; });
-    std::vector<Vector3d> values;
     const auto polygon_type = rows.empty() ? 0U : rows.front().type;
     bool valid = !rows.empty();
     for (std::size_t index = 0U; index < rows.size(); ++index) {
       valid = valid && rows[index].number == index && rows[index].type == polygon_type;
-      values.insert(values.end(), rows[index].values.begin(), rows[index].values.end());
     }
     if (invalid_weld_polygons.contains(polygon_id) || !valid) {
       diagnostics.push_back({ErrorCode::invalid_geometry, owner->second,
@@ -1740,28 +1854,32 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
                              "Polygon-weld seam or coordinate frame is unavailable."});
       continue;
     }
-    MeshData candidate{.object_id = owner->second};
-    if (!append_weld_fillet_sweep(candidate, values, seam->second.size, system->second,
-                                  axes.at(system->second.axes_id))) {
+    const auto found = weld_mesh_indices.find(owner->second);
+    const MeshData empty{.object_id = owner->second};
+    const auto& retained = found == weld_mesh_indices.end() ? empty : meshes[found->second];
+    const auto plan = plan_weld_fillet_sweep(retained, rows, seam->second.size, system->second,
+                                             axes.at(system->second.axes_id));
+    if (!plan) {
       diagnostics.push_back({ErrorCode::invalid_geometry, owner->second,
                              "Persisted polygon-weld path or frame is invalid."});
       continue;
     }
-    if (!geometry_budget.consume_mesh(candidate.positions.size(), candidate.indices.size())) {
+    if (!geometry_budget.consume_mesh(plan->position_growth, plan->index_growth,
+                                      found == weld_mesh_indices.end())) {
       diagnostics.push_back({ErrorCode::resource_limit, owner->second,
                              "Polygon-weld mesh exceeds the aggregate geometry memory budget."});
       continue;
     }
-    const auto [found, inserted] = weld_mesh_indices.try_emplace(owner->second, meshes.size());
-    if (inserted) {
-      meshes.push_back(std::move(candidate));
-      continue;
+    std::size_t mesh_index = 0U;
+    if (found == weld_mesh_indices.end()) {
+      mesh_index = meshes.size();
+      weld_mesh_indices.emplace(owner->second, mesh_index);
+      meshes.push_back(empty);
+    } else {
+      mesh_index = found->second;
     }
-    auto& mesh = meshes[found->second];
-    const auto vertex_offset = static_cast<std::uint32_t>(mesh.positions.size() / 3U);
-    mesh.positions.insert(mesh.positions.end(), candidate.positions.begin(),
-                          candidate.positions.end());
-    for (const auto index : candidate.indices) mesh.indices.push_back(vertex_offset + index);
+    append_weld_fillet_sweep(meshes[mesh_index], rows, seam->second.size, system->second,
+                             axes.at(system->second.axes_id), *plan);
   }
   for (const auto polygon_id : invalid_weld_polygons) {
     if (weld_polygon_rows.contains(polygon_id)) continue;

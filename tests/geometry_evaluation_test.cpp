@@ -1,6 +1,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 #include "geometry.hpp"
@@ -36,6 +37,13 @@ int main() {
   const auto fastener = known_fastener_dimensions("7990", 20.0);
   CHECK(fastener && near(fastener->across_flats, 30.0) && near(fastener->height, 13.0));
   CHECK(!known_fastener_dimensions("UNKNOWN", 20.0));
+
+  constexpr auto maximum_vertex = std::numeric_limits<std::uint32_t>::max();
+  CHECK(checked_indexed_mesh_append_base(12U, 9U) == 4U);
+  CHECK(checked_indexed_mesh_append_base(static_cast<std::size_t>(maximum_vertex - 1U) * 3U, 3U) ==
+        maximum_vertex - 1U);
+  CHECK(!checked_indexed_mesh_append_base(static_cast<std::size_t>(maximum_vertex - 1U) * 3U, 9U));
+  CHECK(!checked_indexed_mesh_append_base(4U, 3U));
 
   const std::array<double, 1> three_bars{3.0};
   auto tapered = evaluate_tapered_straight_group_centerlines(
