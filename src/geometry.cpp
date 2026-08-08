@@ -1241,29 +1241,33 @@ void set_tapered_section_metrics(DefinitionGeometryView& definition,
     return std::nullopt;
   std::vector<std::array<double, 2>> result;
   if (std::find(contour.types.begin(), contour.types.end(), 40U) != contour.types.end()) {
-    if (std::any_of(contour.types.begin(), contour.types.end(),
-                    [](std::uint32_t type) { return type != 0U && type != 40U; })) {
-      return std::nullopt;
-    }
+    // Tekla persists CHAMFER_ARC_POINT as 40 on an otherwise ordinary contour;
+    // expand only those control points so the surviving vertex chamfers still compose.
     for (std::size_t index = 0; index < contour.types.size(); ++index) {
       if (contour.types[index] == 40U &&
           contour.types[(index + contour.types.size() - 1U) % contour.types.size()] == 40U) {
         return std::nullopt;
       }
     }
-    const auto append_distinct = [&](std::array<double, 2> value) {
-      if (result.empty() ||
-          std::hypot(result.back()[0] - value[0], result.back()[1] - value[1]) > 1e-7) {
-        result.push_back(value);
+    Contour expanded;
+    const auto append_distinct = [&](Vector3d point, double dx, double dy, std::uint32_t type) {
+      if (expanded.points.empty() || std::hypot(expanded.points.back().x - point.x,
+                                                expanded.points.back().y - point.y) > 1e-7) {
+        expanded.points.push_back(point);
+        expanded.dx.push_back(dx);
+        expanded.dy.push_back(dy);
+        expanded.types.push_back(type);
       }
     };
     for (std::size_t index = 0; index < contour.points.size(); ++index) {
       if (contour.types[index] == 40U) continue;
       const auto start = contour.points[index];
-      append_distinct({start.x, start.y});
+      append_distinct(start, contour.dx[index], contour.dy[index], contour.types[index]);
       const auto control_index = (index + 1U) % contour.points.size();
       if (contour.types[control_index] != 40U) continue;
-      const auto end = contour.points[(index + 2U) % contour.points.size()];
+      const auto end_index = (index + 2U) % contour.points.size();
+      if (contour.types[end_index] == 40U) return std::nullopt;
+      const auto end = contour.points[end_index];
       const auto control = contour.points[control_index];
       const double determinant =
           2.0 * (start.x * (control.y - end.y) + control.x * (end.y - start.y) +
@@ -1300,14 +1304,19 @@ void set_tapered_section_metrics(DefinitionGeometryView& definition,
         const double sampled_angle =
             start_angle + sweep * static_cast<double>(step) / static_cast<double>(steps);
         append_distinct({center[0] + radius * std::cos(sampled_angle),
-                         center[1] + radius * std::sin(sampled_angle)});
+                         center[1] + radius * std::sin(sampled_angle), 0.0},
+                        0.0, 0.0, 0U);
       }
     }
-    if (result.size() > 1U && std::hypot(result.front()[0] - result.back()[0],
-                                         result.front()[1] - result.back()[1]) <= 1e-7) {
-      result.pop_back();
+    if (expanded.points.size() > 1U &&
+        std::hypot(expanded.points.front().x - expanded.points.back().x,
+                   expanded.points.front().y - expanded.points.back().y) <= 1e-7) {
+      expanded.points.pop_back();
+      expanded.dx.pop_back();
+      expanded.dy.pop_back();
+      expanded.types.pop_back();
     }
-    return result.size() >= 3U ? std::optional{std::move(result)} : std::nullopt;
+    return expanded.points.size() >= 3U ? chamfered(expanded) : std::nullopt;
   }
   for (std::size_t index = 0; index < contour.points.size(); ++index) {
     const auto point = contour.points[index];

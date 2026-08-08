@@ -107,7 +107,8 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
                   bool report_fixture = false, bool zero_position_report_fixture = false,
                   bool bolt_fixture = false, bool legacy_bolt_fixture = false,
                   bool assembly_fixture = false,
-                  PartFrameFixture part_frame = PartFrameFixture::orthogonal) {
+                  PartFrameFixture part_frame = PartFrameFixture::orthogonal,
+                  bool mixed_contour = false) {
   constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
                                                std::byte{0xdb}};
   constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
@@ -762,11 +763,14 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
     constexpr std::array<double, 4> contour_y{0.0, 0.0, 300.0, 300.0};
     constexpr std::array<double, 5> arc_x{0.0, 150.0, 300.0, 300.0, 0.0};
     constexpr std::array<double, 5> arc_y{0.0, -100.0, 0.0, 300.0, 300.0};
+    constexpr std::array<double, 5> mixed_x{0.0, 300.0, 400.0, 300.0, 0.0};
+    constexpr std::array<double, 5> mixed_y{0.0, 0.0, 150.0, 300.0, 300.0};
     constexpr std::array<double, 3> path_x{0.0, 500.0, 1000.0};
     constexpr std::array<double, 3> path_y{0.0, 500.0, 0.0};
-    const auto point_count = polybeam      ? path_x.size()
-                             : arc_contour ? arc_x.size()
-                                           : contour_x.size();
+    const auto point_count = polybeam        ? path_x.size()
+                             : mixed_contour ? mixed_x.size()
+                             : arc_contour   ? arc_x.size()
+                                             : contour_x.size();
     for (const auto& field : schema.table_fields(table)) {
       if (field.name == "id") write_u32(tuple, field.offset, 960);
       for (std::size_t index = 0; index < 10; ++index) {
@@ -779,25 +783,31 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
           }
         };
         if (field.name == "x" + suffix) {
-          write_scalar(index < point_count ? polybeam      ? path_x[index]
-                                             : arc_contour ? arc_x[index]
-                                                           : contour_x[index]
+          write_scalar(index < point_count ? polybeam        ? path_x[index]
+                                             : mixed_contour ? mixed_x[index]
+                                             : arc_contour   ? arc_x[index]
+                                                             : contour_x[index]
                                            : 0.0);
         }
         if (field.name == "y" + suffix) {
-          write_scalar(index < point_count ? polybeam      ? path_y[index]
-                                             : arc_contour ? arc_y[index]
-                                                           : contour_y[index]
+          write_scalar(index < point_count ? polybeam        ? path_y[index]
+                                             : mixed_contour ? mixed_y[index]
+                                             : arc_contour   ? arc_y[index]
+                                                             : contour_y[index]
                                            : 0.0);
         }
         if (field.name == "z" + suffix) write_scalar(0.0);
         if (field.name == "dx" + suffix || field.name == "dy" + suffix) {
-          write_scalar(contour && !arc_contour && index < point_count ? 150.0 : 0.0);
+          write_scalar(mixed_contour && index == 0U                                       ? 50.0
+                       : contour && !arc_contour && !mixed_contour && index < point_count ? 150.0
+                                                                                          : 0.0);
         }
         if (field.name == "types" + suffix) {
-          const auto corner_type = arc_contour && index == 1U ? 40U
-                                   : contour && !arc_contour  ? 20U
-                                                              : 0U;
+          const auto corner_type = mixed_contour && index == 0U   ? 20U
+                                   : mixed_contour && index == 2U ? 40U
+                                   : arc_contour && index == 1U   ? 40U
+                                   : contour && !arc_contour      ? 20U
+                                                                  : 0U;
           write_u32(tuple, field.offset, index < point_count ? corner_type : 2'147'483'647U);
         }
       }
@@ -896,7 +906,7 @@ std::vector<std::byte> database_with_one_object(
     bool duplicate_property_fixture = false, bool report_fixture = false,
     bool zero_position_report_fixture = false, bool bolt_fixture = false,
     bool legacy_bolt_fixture = false, bool assembly_fixture = false,
-    PartFrameFixture part_frame = PartFrameFixture::orthogonal) {
+    PartFrameFixture part_frame = PartFrameFixture::orthogonal, bool mixed_contour = false) {
   constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
                                                std::byte{0xdb}};
   const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
@@ -917,7 +927,7 @@ std::vector<std::byte> database_with_one_object(
                    edge_chamfer, arc_contour, component_fixture, keyed_tables, weld_fixture,
                    zero_transverse_axis, duplicate_property_fixture, report_fixture,
                    zero_position_report_fixture, bolt_fixture, legacy_bolt_fixture,
-                   assembly_fixture, part_frame);
+                   assembly_fixture, part_frame, mixed_contour);
     }
   }
   return bytes;
@@ -3460,6 +3470,29 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
                 batch.value().meshes.front().positions.size() > 24 &&
                 batch.value().meshes.front().indices.size() > 36,
             "a persisted three-point arc becomes a tessellated plate edge");
+    }
+  }
+
+  const auto mixed_contour_bytes = database_with_one_object(
+      "PL10", "14", "9.08", false, 2, true, false, false, false, false, false, false, false, false,
+      false, false, false, false, false, false, PartFrameFixture::orthogonal, true);
+  ModelPackage mixed_contour_package;
+  mixed_contour_package.add(
+      Asset::copy(AssetRole::model_database, "mixed-contour.db1", mixed_contour_bytes));
+  auto mixed_contour_model = open(std::move(mixed_contour_package));
+  CHECK(mixed_contour_model.has_value(), "the mixed-curve contour fixture opens");
+  if (mixed_contour_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = mixed_contour_model.value().process(request);
+    CHECK(processed.has_value(), "mixed-curve contour processing is available");
+    if (processed) {
+      auto batch = processed.value()->next();
+      CHECK(batch.has_value() && batch.value().kind == BatchKind::meshes &&
+                batch.value().meshes.size() == 1 &&
+                batch.value().meshes.front().positions.size() > 24 &&
+                batch.value().meshes.front().indices.size() > 36,
+            "rounding and three-point arcs compose within one persisted contour");
     }
   }
 
