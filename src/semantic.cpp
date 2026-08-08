@@ -20,6 +20,7 @@
 #include "record.hpp"
 #include "identity.hpp"
 #include "role_schema.hpp"
+#include "weld_semantics.hpp"
 
 namespace tekla::db1::detail {
 namespace {
@@ -1341,6 +1342,74 @@ class RebarSemanticReader final : public BatchReader {
   std::vector<PropertyView> properties_;
 };
 
+class WeldSemanticReader final : public BatchReader {
+ public:
+  WeldSemanticReader(std::vector<WeldSemantics> welds, std::size_t batch_size)
+      : welds_(std::move(welds)), batch_size_(batch_size) {
+    properties_.reserve(batch_size_ * 11U);
+  }
+
+  Result<BatchView> next() override {
+    if (row_ >= welds_.size()) {
+      return Result<BatchView>::success(BatchView{.kind = BatchKind::end});
+    }
+    properties_.clear();
+    const auto end = std::min(welds_.size(), row_ + batch_size_);
+    while (row_ < end) {
+      const auto& weld = welds_[row_++];
+      const auto add_integer = [&](std::string_view name, std::int64_t value) {
+        properties_.push_back(PropertyView{.object_id = weld.object_id,
+                                           .group = "Tekla",
+                                           .name = name,
+                                           .kind = PropertyValueKind::integer,
+                                           .integer_value = value});
+      };
+      const auto add_floating = [&](std::string_view name, double value) {
+        if (!std::isfinite(value)) return;
+        properties_.push_back(PropertyView{.object_id = weld.object_id,
+                                           .group = "Tekla",
+                                           .name = name,
+                                           .kind = PropertyValueKind::floating,
+                                           .floating_value = value});
+      };
+      add_integer("weldShop", weld.common.workshop);
+      add_integer("weldAround", weld.common.around);
+      add_integer("weldCompound", weld.common.compound);
+      add_integer("weldLogical", weld.common.logical);
+      if (weld.common.intermittent_type.has_value()) {
+        add_integer("weldIntermittentType", *weld.common.intermittent_type);
+      }
+      if (weld.above.has_value()) {
+        add_floating("weldSizeAbove", weld.above->size);
+        add_integer("weldTypeAbove", weld.above->type);
+        add_integer("weldIntermittentAbove", weld.above->intermittent);
+      }
+      if (weld.below.has_value()) {
+        add_floating("weldSizeBelow", weld.below->size);
+        add_integer("weldTypeBelow", weld.below->type);
+        add_integer("weldIntermittentBelow", weld.below->intermittent);
+      }
+    }
+    return Result<BatchView>::success(
+        BatchView{.kind = BatchKind::properties, .properties = properties_});
+  }
+
+ private:
+  std::vector<WeldSemantics> welds_;
+  std::size_t batch_size_ = 0U;
+  std::size_t row_ = 0U;
+  std::vector<PropertyView> properties_;
+};
+
+[[nodiscard]] Result<ProcessStream> make_weld_semantic_stream(
+    std::shared_ptr<const ModelStorage> storage, const Schema& schema,
+    const ProcessRequest& request) {
+  auto welds = load_weld_semantics(*storage, schema);
+  if (!welds) return Result<ProcessStream>::failure(welds.error());
+  return Result<ProcessStream>::success(std::make_unique<WeldSemanticReader>(
+      std::move(welds.value()), batch_size_for(request, 384U)));
+}
+
 [[nodiscard]] Result<ProcessStream> make_rebar_semantic_stream(
     std::shared_ptr<const ModelStorage> storage, const Schema& schema,
     const ProcessRequest& request) {
@@ -1807,6 +1876,13 @@ Result<ProcessStream> make_property_stream(std::shared_ptr<const ModelStorage> s
     auto rebars = make_rebar_semantic_stream(storage, schema, request);
     if (!rebars) return Result<ProcessStream>::failure(rebars.error());
     streams.push_back(std::move(rebars.value()));
+  }
+  const auto* welding_schema = schema.find_table("welding");
+  if (welding_schema != nullptr && welding_schema->ordinal < storage->layout.tables.size() &&
+      storage->layout.tables[welding_schema->ordinal].info.row_count != 0U) {
+    auto welds = make_weld_semantic_stream(storage, schema, request);
+    if (!welds) return Result<ProcessStream>::failure(welds.error());
+    streams.push_back(std::move(welds.value()));
   }
   return Result<ProcessStream>::success(std::make_unique<ChainedReader>(std::move(streams)));
 }

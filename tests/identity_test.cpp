@@ -136,6 +136,25 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
     append_u32(bytes, 7);
     append_u32(bytes, 91);
     append_u32(bytes, 92);
+    if (weld_fixture) {
+      bytes.push_back(std::byte{0});
+      const auto tuple_offset = bytes.size();
+      bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+      auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id" || field.name == "kuuluu") write_u32(tuple, field.offset, 1202U);
+        if (field.name == "assembly") write_u32(tuple, field.offset, 700U);
+        if (field.name == "type") write_u32(tuple, field.offset, 13U);
+        if (field.name == "subtype") write_u32(tuple, field.offset, 0U);
+        if (field.name == "guid") {
+          for (std::size_t index = 0; index < field.size; ++index) {
+            tuple[field.offset + index] = static_cast<std::byte>(0xd0U + index);
+          }
+        }
+      }
+      append_u32(bytes, 93U);
+      append_u32(bytes, 94U);
+    }
     if (component_fixture) {
       const auto append_object = [&](std::uint32_t id, std::uint32_t parent, std::uint32_t type,
                                      std::uint8_t guid_seed) {
@@ -343,27 +362,60 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
     append_u32(bytes, 2300U);
     append_u32(bytes, 2400U);
   } else if (weld_fixture && table.name == "welding") {
-    bytes.push_back(std::byte{0});
-    const auto tuple_offset = bytes.size();
-    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
-    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
-    for (const auto& field : schema.table_fields(table)) {
-      if (field.name == "id") write_u32(tuple, field.offset, 1201U);
-      if (field.name == "weld_common_attr_id") write_u32(tuple, field.offset, 901U);
-    }
-    append_u32(bytes, 2500U);
-    append_u32(bytes, 2600U);
+    const auto append_weld = [&](std::uint32_t id, std::uint32_t common_id) {
+      bytes.push_back(std::byte{0});
+      const auto tuple_offset = bytes.size();
+      bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+      auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, id);
+        if (field.name == "weld_common_attr_id") write_u32(tuple, field.offset, common_id);
+        if (field.name == "weld_seam1_id") write_u32(tuple, field.offset, 902U);
+        if (field.name == "weld_seam2_id") write_u32(tuple, field.offset, 903U);
+      }
+      append_u32(bytes, id + 1300U);
+      append_u32(bytes, id + 1400U);
+    };
+    append_weld(1201U, 901U);
+    append_weld(1202U, 904U);
   } else if (weld_fixture && table.name == "welding_common_attr") {
-    bytes.push_back(std::byte{0});
-    const auto tuple_offset = bytes.size();
-    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
-    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
-    for (const auto& field : schema.table_fields(table)) {
-      if (field.name == "id") write_u32(tuple, field.offset, 901U);
-      if (field.name == "workshop_weld") write_u32(tuple, field.offset, 1U);
-    }
-    append_u32(bytes, 2700U);
-    append_u32(bytes, 2800U);
+    const auto append_common = [&](std::uint32_t id, std::uint32_t workshop) {
+      bytes.push_back(std::byte{0});
+      const auto tuple_offset = bytes.size();
+      bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+      auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, id);
+        if (field.name == "around_weld") write_u32(tuple, field.offset, 1U);
+        if (field.name == "workshop_weld") write_u32(tuple, field.offset, workshop);
+        if (field.name == "compound_weld") write_u32(tuple, field.offset, 1U);
+        if (field.name == "logical_weld") write_u32(tuple, field.offset, 0U);
+        if (field.name == "intermittent_type") write_u32(tuple, field.offset, 2U);
+      }
+      append_u32(bytes, id + 1800U);
+      append_u32(bytes, id + 1900U);
+    };
+    append_common(901U, 1U);
+    append_common(904U, 0U);
+  } else if (weld_fixture && table.name == "welding_attr") {
+    const auto append_weld_attribute = [&](std::uint32_t id, float size, std::uint32_t type,
+                                           std::uint32_t intermittent) {
+      bytes.push_back(std::byte{0});
+      const auto tuple_offset = bytes.size();
+      bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+      auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, id);
+        if (field.name == "size")
+          write_u32(tuple, field.offset, std::bit_cast<std::uint32_t>(size));
+        if (field.name == "type") write_u32(tuple, field.offset, type);
+        if (field.name == "intermittent") write_u32(tuple, field.offset, intermittent);
+      }
+      append_u32(bytes, id + 100U);
+      append_u32(bytes, id + 200U);
+    };
+    append_weld_attribute(902U, 5.0F, 10U, 1U);
+    append_weld_attribute(903U, 3.0F, 6U, 0U);
   } else if ((bolt_fixture || legacy_bolt_fixture) && table.name == "bolt") {
     bytes.push_back(std::byte{0});
     const auto tuple_offset = bytes.size();
@@ -1504,12 +1556,83 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     CHECK(processed.has_value(), "workshop-weld identity processing is available");
     if (processed) {
       auto batch = processed.value()->next();
-      CHECK(batch.has_value() && batch.value().kind == BatchKind::objects &&
-                batch.value().objects.size() == 1U &&
-                batch.value().objects.front().kind == ObjectKind::weld &&
-                batch.value().objects.front().weld_location == WeldLocation::workshop,
-            "a welding common-attribute reference exposes workshop weld semantics");
+      bool saw_workshop = false;
+      bool saw_site = false;
+      if (batch && batch.value().kind == BatchKind::objects) {
+        for (const auto& object : batch.value().objects) {
+          saw_workshop |= object.internal_id == 1201U && object.kind == ObjectKind::weld &&
+                          object.weld_location == WeldLocation::workshop;
+          saw_site |= object.internal_id == 1202U && object.kind == ObjectKind::weld &&
+                      object.weld_location == WeldLocation::site;
+        }
+      }
+      CHECK(saw_workshop && saw_site,
+            "welding common-attribute references distinguish workshop and site welds");
     }
+
+    ProcessRequest property_request;
+    property_request.stages = Stage::properties;
+    auto properties = weld_model.value().process(property_request);
+    CHECK(properties.has_value(), "weld property processing is available without part rows");
+    bool saw_shop = false;
+    bool saw_around = false;
+    bool saw_compound = false;
+    bool saw_logical = false;
+    bool saw_intermittent_type = false;
+    bool saw_size_above = false;
+    bool saw_type_above = false;
+    bool saw_intermittent_above = false;
+    bool saw_size_below = false;
+    bool saw_type_below = false;
+    bool saw_intermittent_below = false;
+    if (properties) {
+      while (true) {
+        auto batch = properties.value()->next();
+        CHECK(batch.has_value(), "weld property batches decode without an error");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        if (batch.value().kind != BatchKind::properties) continue;
+        for (const auto& property : batch.value().properties) {
+          if (property.object_id != 1201U || property.group != "Tekla") {
+            continue;
+          }
+          saw_shop |= property.name == "weldShop" && property.kind == PropertyValueKind::integer &&
+                      property.integer_value == 1;
+          saw_around |= property.name == "weldAround" &&
+                        property.kind == PropertyValueKind::integer && property.integer_value == 1;
+          saw_compound |= property.name == "weldCompound" &&
+                          property.kind == PropertyValueKind::integer &&
+                          property.integer_value == 1;
+          saw_logical |= property.name == "weldLogical" &&
+                         property.kind == PropertyValueKind::integer && property.integer_value == 0;
+          saw_intermittent_type |= property.name == "weldIntermittentType" &&
+                                   property.kind == PropertyValueKind::integer &&
+                                   property.integer_value == 2;
+          saw_size_above |= property.name == "weldSizeAbove" &&
+                            property.kind == PropertyValueKind::floating &&
+                            property.floating_value == 5.0;
+          saw_type_above |= property.name == "weldTypeAbove" &&
+                            property.kind == PropertyValueKind::integer &&
+                            property.integer_value == 10;
+          saw_intermittent_above |= property.name == "weldIntermittentAbove" &&
+                                    property.kind == PropertyValueKind::integer &&
+                                    property.integer_value == 1;
+          saw_size_below |= property.name == "weldSizeBelow" &&
+                            property.kind == PropertyValueKind::floating &&
+                            property.floating_value == 3.0;
+          saw_type_below |= property.name == "weldTypeBelow" &&
+                            property.kind == PropertyValueKind::integer &&
+                            property.integer_value == 6;
+          saw_intermittent_below |= property.name == "weldIntermittentBelow" &&
+                                    property.kind == PropertyValueKind::integer &&
+                                    property.integer_value == 0;
+        }
+      }
+    }
+    CHECK(saw_shop && saw_around && saw_compound && saw_logical && saw_intermittent_type,
+          "persisted common weld semantics are ordinary Tekla properties");
+    CHECK(saw_size_above && saw_type_above && saw_intermittent_above && saw_size_below &&
+              saw_type_below && saw_intermittent_below,
+          "linked weld seams expose native above/below size, type, and intermittent values");
   }
 
   ModelPackage semantic_package;

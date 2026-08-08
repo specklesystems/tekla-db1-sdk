@@ -81,6 +81,7 @@ add_library(tekla_db1_core STATIC
   src/profile.cpp
   src/role_schema.cpp
   src/semantic.cpp
+  src/weld_semantics.cpp
   src/schema_validation.cpp)
 target_sources(tekla_db1_core PRIVATE
   src/shape.cpp
