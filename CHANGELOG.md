@@ -25,6 +25,9 @@ compatibility policy in the support matrix.
 - Persisted Boolean-add operands fuse into their visible host before cut and
   weld-preparation operands are subtracted, including nested graphs carried
   through the supervised OCCT worker protocol.
+- The built-in nominal steel fallback resolves the EN 10365
+  `PFC200*90*30` channel with its published dimensions, root radii, area, and
+  cover perimeter when a model-local LIS catalog is unavailable.
 
 ### Changed
 
