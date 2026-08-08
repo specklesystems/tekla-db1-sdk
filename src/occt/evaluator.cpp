@@ -1,5 +1,6 @@
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
@@ -660,6 +661,36 @@ struct CsgBuildProfile {
     }
     shape = operation.Shape();
     profile.box_boolean_seconds += std::chrono::duration<double>(Clock::now() - started).count();
+  }
+  std::vector<TopoDS_Shape> union_shapes;
+  union_shapes.reserve(node.union_nodes.size());
+  for (const auto child_index : node.union_nodes) {
+    auto child = build_csg_node(request, child_index, depth + 1U, states, cache, profile);
+    if (!child) {
+      states[node_index] = 0U;
+      return child;
+    }
+    union_shapes.push_back(std::move(child.value()));
+  }
+  if (!union_shapes.empty()) {
+    const auto started = Clock::now();
+    BRepAlgoAPI_Fuse operation;
+    TopTools_ListOfShape arguments;
+    TopTools_ListOfShape tools;
+    arguments.Append(shape);
+    for (const auto& child : union_shapes) tools.Append(child);
+    operation.SetArguments(arguments);
+    operation.SetTools(tools);
+    operation.SetRunParallel(false);
+    operation.SetFuzzyValue(1.0e-4);
+    operation.Build();
+    if (!operation.IsDone()) {
+      states[node_index] = 0U;
+      return Result<TopoDS_Shape>::failure(
+          {ErrorCode::invalid_topology, "OCCT could not fuse a nested CSG node."});
+    }
+    shape = operation.Shape();
+    profile.mesh_boolean_seconds += std::chrono::duration<double>(Clock::now() - started).count();
   }
   std::vector<TopoDS_Shape> child_shapes;
   child_shapes.reserve(node.subtract_nodes.size());

@@ -22,6 +22,9 @@ compatibility policy in the support matrix.
 - `ObjectRole`, `object_role`, and `is_model_element` distinguish independently
   publishable model elements from Boolean-part and cut-plane evaluation
   features while retaining all persisted identities for raw processing.
+- Persisted Boolean-add operands fuse into their visible host before cut and
+  weld-preparation operands are subtracted, including nested graphs carried
+  through the supervised OCCT worker protocol.
 
 ### Changed
 

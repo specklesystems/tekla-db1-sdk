@@ -17,8 +17,8 @@ namespace {
 
 constexpr std::uint32_t kRequestMagic = 0x5254434fU;
 constexpr std::uint32_t kResponseMagic = 0x5354434fU;
-constexpr std::uint32_t kVersion = 6;
-constexpr std::uint64_t kNodeHeaderSize = 112U;
+constexpr std::uint32_t kVersion = 7;
+constexpr std::uint64_t kNodeHeaderSize = 120U;
 constexpr std::uint32_t kMaximumNodeCount = 4'096U;
 constexpr std::uint32_t kMaximumRecipeLoopCount = 4'096U;
 constexpr std::uint32_t kMaximumSweepSectionCount = 262'144U;
@@ -145,9 +145,12 @@ void half_space(std::vector<std::byte>& bytes, const OcctHalfSpace& value) {
 [[nodiscard]] bool node_counts_fit(const OcctShapeNode& node, std::size_t node_count) noexcept {
   return node.subtract.size() <= std::numeric_limits<std::uint32_t>::max() &&
          node.keep_half_spaces.size() <= std::numeric_limits<std::uint32_t>::max() &&
+         node.union_nodes.size() <= std::numeric_limits<std::uint32_t>::max() &&
          node.subtract_nodes.size() <= std::numeric_limits<std::uint32_t>::max() &&
          extrusion_counts_fit(node.base_extrusion) && sweep_counts_fit(node.base_ruled_sweep) &&
          mesh_counts_fit(node.base_mesh) &&
+         std::all_of(node.union_nodes.begin(), node.union_nodes.end(),
+                     [node_count](std::uint32_t index) { return index < node_count; }) &&
          std::all_of(node.subtract_nodes.begin(), node.subtract_nodes.end(),
                      [node_count](std::uint32_t index) { return index < node_count; });
 }
@@ -299,6 +302,7 @@ Result<std::vector<std::byte>> encode_occt_request(const OcctRequest& request) {
              static_cast<std::uint64_t>(node.keep_half_spaces.size()) * 48U +
              static_cast<std::uint64_t>(node.base_mesh.positions.size()) * 8U +
              static_cast<std::uint64_t>(node.base_mesh.indices.size()) * 4U +
+             static_cast<std::uint64_t>(node.union_nodes.size()) * 4U +
              static_cast<std::uint64_t>(node.subtract_nodes.size()) * 4U +
              extrusion_payload_size(node.base_extrusion) +
              sweep_payload_size(node.base_ruled_sweep);
@@ -344,6 +348,8 @@ Result<std::vector<std::byte>> encode_occt_request(const OcctRequest& request) {
     f64(bytes, node.base_extrusion.vector_z);
     u32(bytes, static_cast<std::uint32_t>(node.base_ruled_sweep.loops.size()));
     u32(bytes, node.base_ruled_sweep.circular_spine ? 1U : 0U);
+    u32(bytes, static_cast<std::uint32_t>(node.union_nodes.size()));
+    u32(bytes, 0U);
     for (const auto& cutter : node.subtract) box(bytes, cutter);
     for (const auto& plane : node.keep_half_spaces) half_space(bytes, plane);
     mesh_payload(bytes, node.base_mesh);
@@ -358,6 +364,7 @@ Result<std::vector<std::byte>> encode_occt_request(const OcctRequest& request) {
         for (const auto value : section.positions) f64(bytes, value);
       }
     }
+    for (const auto child : node.union_nodes) u32(bytes, child);
     for (const auto child : node.subtract_nodes) u32(bytes, child);
   }
   if (std::getenv("TEKLA_DB1_OCCT_PROFILE") != nullptr) {
@@ -517,7 +524,9 @@ Result<OcctRequest> decode_occt_request(std::span<const std::byte> bytes) {
     node.base_extrusion.vector_z = get_f64(bytes, offset + 96U);
     const auto sweep_loop_count = get_u32(bytes, offset + 104U);
     const auto sweep_flags = get_u32(bytes, offset + 108U);
-    if ((sweep_flags & ~1U) != 0U)
+    const auto union_child_count = get_u32(bytes, offset + 112U);
+    const auto node_reserved = get_u32(bytes, offset + 116U);
+    if ((sweep_flags & ~1U) != 0U || node_reserved != 0U)
       return Result<OcctRequest>::failure(
           {ErrorCode::invalid_argument, "The OCCT worker sweep flags are invalid."});
     node.base_ruled_sweep.circular_spine = (sweep_flags & 1U) != 0U;
@@ -624,9 +633,18 @@ Result<OcctRequest> decode_occt_request(std::span<const std::byte> bytes) {
         }
       }
     }
-    if (!available(static_cast<std::uint64_t>(child_count) * 4U))
+    if (!available((static_cast<std::uint64_t>(union_child_count) + child_count) * 4U))
       return Result<OcctRequest>::failure(
           {ErrorCode::invalid_argument, "The OCCT worker CSG edges are truncated."});
+    node.union_nodes.reserve(union_child_count);
+    for (std::uint32_t child = 0; child < union_child_count; ++child) {
+      const auto child_index = get_u32(bytes, offset);
+      offset += 4U;
+      if (child_index >= node_count)
+        return Result<OcctRequest>::failure(
+            {ErrorCode::invalid_argument, "The OCCT worker CSG edge target is invalid."});
+      node.union_nodes.push_back(child_index);
+    }
     node.subtract_nodes.reserve(child_count);
     for (std::uint32_t child = 0; child < child_count; ++child) {
       if (!available(4U))

@@ -77,6 +77,7 @@ struct OcctShapeNode {
   OcctTriangleMesh base_mesh;
   std::vector<OcctBox> subtract;
   std::vector<OcctHalfSpace> keep_half_spaces;
+  std::vector<std::uint32_t> union_nodes;
   std::vector<std::uint32_t> subtract_nodes;
 };
 

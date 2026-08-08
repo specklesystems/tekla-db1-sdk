@@ -3813,42 +3813,79 @@ class GeometryReader final : public BatchReader {
     const Vector3d midpoint = scale(add(minimum, maximum), 0.5);
     const MeshBounds host_bounds{minimum, maximum};
 
-    struct BooleanCutter {
+    struct BooleanOperand {
       std::uint32_t object_id = 0U;
       MeshData mesh;
       std::optional<ExtrusionRecipe> semantic_recipe;
       double volume = 0.0;
     };
-    std::vector<BooleanCutter> cutters;
+    std::vector<BooleanOperand> additions;
+    std::vector<BooleanOperand> cutters;
+    MeshBounds boolean_bounds = host_bounds;
+    const auto operand_object_type = [&](std::uint32_t target_id) {
+      const auto row = part_rows_.find(target_id);
+      if (row == part_rows_.end()) return 0U;
+      const auto record = parts_->record(storage_->payload.bytes(), row->second);
+      if (record.empty()) return 0U;
+      const auto tuple = record.subspan(1, part_schema_->tuple_size);
+      const auto attribute = attributes_.find(read_u32(tuple, offsets_[1]));
+      return attribute == attributes_.end() ? 0U : attribute->second.object_type;
+    };
     std::unordered_set<std::uint32_t> boolean_targets;
     for (const auto& operation : found->second) {
-      if (operation.type != 11U || !replay_boolean_children ||
+      const bool boolean_operation =
+          operation.type == 11U || operation.type == 38U || operation.type == 39U;
+      if (!boolean_operation || !replay_boolean_children ||
           !boolean_targets.insert(operation.target_id).second)
         continue;
-      auto cutter = operative_mesh(operation.target_id, 0.0, true);
-      if (!cutter) {
+      auto operand = operative_mesh(operation.target_id, 0.0, true);
+      if (!operand) {
         ++graph.partial_results;
         add_diagnostic(ErrorCode::invalid_geometry, object_id,
                        "Boolean operative " + std::to_string(operation.target_id) +
                            " was omitted: its persisted geometry is incomplete.");
         continue;
       }
-      // All persisted child operations are subtractive or clipping, so they
-      // can only shrink this raw operative. A disjoint raw envelope therefore
-      // cannot affect the host and need not enter OCCT at all. This matters for
-      // repeated legacy components whose relation graph retains cutters for
-      // sibling placements outside the current part.
-      const auto cutter_bounds = mesh_bounds(*cutter);
-      if (!cutter_bounds || !intersects(host_bounds, *cutter_bounds)) continue;
-      trim_regular_sweep_to_relevance(*cutter, host_bounds);
-      if (cutter->positions.empty() || cutter->indices.empty()) continue;
-      const double volume = mesh_volume(*cutter);
-      cutters.push_back({operation.target_id, std::move(*cutter), std::nullopt, volume});
+      const auto bounds = mesh_bounds(*operand);
+      if (!bounds) continue;
+      const double volume = mesh_volume(*operand);
+      // Tekla's persisted Boolean-part type is 1=add, 2=cut, 3=weld-prep in
+      // the public API. DB1 stores those operatives as part obj_type 38, 11,
+      // and 39 respectively. Additions belong to this host by relation and
+      // may form a chain beyond the raw host bounds, so retain all of them.
+      if (operation.type == 38U || operand_object_type(operation.target_id) == 38U) {
+        boolean_bounds.minimum.x = std::min(boolean_bounds.minimum.x, bounds->minimum.x);
+        boolean_bounds.minimum.y = std::min(boolean_bounds.minimum.y, bounds->minimum.y);
+        boolean_bounds.minimum.z = std::min(boolean_bounds.minimum.z, bounds->minimum.z);
+        boolean_bounds.maximum.x = std::max(boolean_bounds.maximum.x, bounds->maximum.x);
+        boolean_bounds.maximum.y = std::max(boolean_bounds.maximum.y, bounds->maximum.y);
+        boolean_bounds.maximum.z = std::max(boolean_bounds.maximum.z, bounds->maximum.z);
+        additions.push_back({operation.target_id, std::move(*operand), std::nullopt, volume});
+      } else {
+        cutters.push_back({operation.target_id, std::move(*operand), std::nullopt, volume});
+      }
     }
+    // Subtractive and weld-preparation operands can only shrink the fused
+    // host. Prune stale sibling cutters against the complete host+add envelope.
+    cutters.erase(std::remove_if(cutters.begin(), cutters.end(),
+                                 [&](const BooleanOperand& cutter) {
+                                   const auto bounds = mesh_bounds(cutter.mesh);
+                                   return !bounds || !intersects(boolean_bounds, *bounds);
+                                 }),
+                  cutters.end());
+    for (auto& cutter : cutters) {
+      trim_regular_sweep_to_relevance(cutter.mesh, boolean_bounds);
+    }
+    cutters.erase(std::remove_if(cutters.begin(), cutters.end(),
+                                 [](const BooleanOperand& cutter) {
+                                   return cutter.mesh.positions.empty() ||
+                                          cutter.mesh.indices.empty();
+                                 }),
+                  cutters.end());
     if (cutters.size() > 1U) {
       const auto [minimum_volume, maximum_volume] =
           std::minmax_element(cutters.begin(), cutters.end(),
-                              [](const BooleanCutter& left, const BooleanCutter& right) {
+                              [](const BooleanOperand& left, const BooleanOperand& right) {
                                 return left.volume < right.volume;
                               });
       const double tolerance = std::max(1.0, maximum_volume->volume * 1.0e-8);
@@ -3866,10 +3903,30 @@ class GeometryReader final : public BatchReader {
     for (auto& cutter : cutters) {
       cutter.semantic_recipe = prism_recipe_from_mesh(cutter.object_id, cutter.mesh);
     }
-    std::stable_sort(cutters.begin(), cutters.end(),
-                     [](const BooleanCutter& left, const BooleanCutter& right) {
+    for (auto& addition : additions) {
+      addition.semantic_recipe = prism_recipe_from_mesh(addition.object_id, addition.mesh);
+    }
+    std::stable_sort(additions.begin(), additions.end(),
+                     [](const BooleanOperand& left, const BooleanOperand& right) {
                        return left.volume > right.volume;
                      });
+    std::stable_sort(cutters.begin(), cutters.end(),
+                     [](const BooleanOperand& left, const BooleanOperand& right) {
+                       return left.volume > right.volume;
+                     });
+    for (auto& addition : additions) {
+      auto child =
+          append_csg_node(addition.object_id, std::move(addition.mesh), graph, depth + 1U, request,
+                          std::move(addition.semantic_recipe), force_mesh_fallback);
+      if (!child) {
+        ++graph.partial_results;
+        add_diagnostic(child.error().code, object_id,
+                       "Boolean operative " + std::to_string(addition.object_id) +
+                           " was omitted: " + child.error().message);
+        continue;
+      }
+      request.nodes[node_index].union_nodes.push_back(child.value());
+    }
     for (auto& cutter : cutters) {
       auto child = append_csg_node(cutter.object_id, std::move(cutter.mesh), graph, depth + 1U,
                                    request, std::move(cutter.semantic_recipe), force_mesh_fallback);
@@ -3995,8 +4052,8 @@ class GeometryReader final : public BatchReader {
     auto request = build_request(graph, false);
     if (!request) return Result<bool>::failure(std::move(request.error()));
     const auto& root_node = request.value().nodes.front();
-    if (root_node.subtract.empty() && root_node.subtract_nodes.empty() &&
-        root_node.keep_half_spaces.empty()) {
+    if (root_node.subtract.empty() && root_node.union_nodes.empty() &&
+        root_node.subtract_nodes.empty() && root_node.keep_half_spaces.empty()) {
       return Result<bool>::success(false);
     }
     Result<OcctMesh> evaluated = evaluate_request(request.value());
@@ -4536,11 +4593,13 @@ Result<ProcessStream> make_geometry_stream(std::shared_ptr<const ModelStorage> s
         const auto tuple = record.subspan(1, relations->tuple_size);
         const auto operation_type = read_u32(tuple, type->offset);
         if (operation_type != 9U && operation_type != 11U && operation_type != 12U &&
-            operation_type != 79U)
+            operation_type != 38U && operation_type != 39U && operation_type != 79U)
           continue;
         const auto target_id = read_u32(tuple, target->offset);
         if (operation_type == 79U && !chamfer_map.contains(target_id)) continue;
-        if (operation_type == 11U) boolean_operatives.insert(target_id);
+        if (operation_type == 11U || operation_type == 38U || operation_type == 39U) {
+          boolean_operatives.insert(target_id);
+        }
         operations[read_u32(tuple, source->offset)].push_back(
             {operation_type, target_id, read_u32(tuple, relation_id->offset),
              read_u32(record, 1 + relations->tuple_size + 4U)});

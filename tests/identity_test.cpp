@@ -1485,7 +1485,8 @@ void append_boolean_chain_table(std::vector<std::byte>& bytes,
                                 const tekla::db1::detail::Schema& schema,
                                 const tekla::db1::detail::TableSchema& table, bool final,
                                 std::size_t part_count, bool cycle, bool shared,
-                                bool boolean_part_operands, bool swept_root) {
+                                bool boolean_part_operands, bool swept_root,
+                                bool additive_operand) {
   constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
                                                std::byte{0xdb}};
   constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
@@ -1536,7 +1537,7 @@ void append_boolean_chain_table(std::vector<std::byte>& bytes,
       append_tuple([&](std::span<std::byte> tuple) {
         for (const auto& field : schema.table_fields(table)) {
           if (field.name == "id") write_u32(tuple, field.offset, 800U + id_offset);
-          if (field.name == "type") write_u32(tuple, field.offset, 11U);
+          if (field.name == "type") write_u32(tuple, field.offset, additive_operand ? 38U : 11U);
           if (field.name == "id1") {
             write_u32(tuple, field.offset, shared ? shared_relations[index][0] : 1201U + id_offset);
           }
@@ -1566,7 +1567,9 @@ void append_boolean_chain_table(std::vector<std::byte>& bytes,
           if (field.name == "id") write_u32(tuple, field.offset, 1201U + id_offset);
           if (field.name == "part_attr_id") {
             write_u32(tuple, field.offset,
-                      (boolean_part_operands || swept_root) && index > 0U ? 902U : 900U);
+                      (boolean_part_operands || swept_root || additive_operand) && index > 0U
+                          ? 902U
+                          : 900U);
           }
           if (field.name == "csys_attr_id") write_u32(tuple, field.offset, 901U);
           if (field.name == "p1")
@@ -1576,7 +1579,9 @@ void append_boolean_chain_table(std::vector<std::byte>& bytes,
           }
           if (field.name == "csys_x") {
             write_f64(tuple, field.offset,
-                      shared && index < 2U ? 10.0 : 10.0 + 100.0 * static_cast<double>(index));
+                      additive_operand && index > 0U ? 910.0
+                      : shared && index < 2U         ? 10.0
+                                                     : 10.0 + 100.0 * static_cast<double>(index));
           }
           if (field.name == "csys_y") write_f64(tuple, field.offset, 20.0);
           if (field.name == "csys_z") write_f64(tuple, field.offset, 30.0);
@@ -1602,8 +1607,8 @@ void append_boolean_chain_table(std::vector<std::byte>& bytes,
       });
     };
     append_attribute(900U, 2U, swept_root);
-    if (boolean_part_operands || swept_root) {
-      append_attribute(902U, boolean_part_operands ? 11U : 2U, false);
+    if (boolean_part_operands || swept_root || additive_operand) {
+      append_attribute(902U, additive_operand ? 38U : boolean_part_operands ? 11U : 2U, false);
     }
   } else if (table.name == "coordsys_attr") {
     append_tuple([&](std::span<std::byte> tuple) {
@@ -1623,7 +1628,8 @@ void append_boolean_chain_table(std::vector<std::byte>& bytes,
 std::vector<std::byte> database_with_boolean_chain(std::size_t part_count, bool cycle = false,
                                                    bool shared = false,
                                                    bool boolean_part_operands = false,
-                                                   bool swept_root = false) {
+                                                   bool swept_root = false,
+                                                   bool additive_operand = false) {
   constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
                                                std::byte{0xdb}};
   const auto* schema = tekla::db1::detail::schema_for("9.66", 0x85);
@@ -1638,7 +1644,7 @@ std::vector<std::byte> database_with_boolean_chain(std::size_t part_count, bool 
     for (std::size_t index = 0; index < schema->tables.size(); ++index) {
       append_boolean_chain_table(bytes, *schema, schema->tables[index],
                                  index + 1U == schema->tables.size(), part_count, cycle, shared,
-                                 boolean_part_operands, swept_root);
+                                 boolean_part_operands, swept_root, additive_operand);
     }
   }
   return bytes;
@@ -3959,6 +3965,37 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
   check_boolean_graph(3U, true, ErrorCode::invalid_topology, "cycle", false);
   check_boolean_graph(35U, false, ErrorCode::resource_limit, "depth", false);
   check_boolean_graph(3U, true, ErrorCode::none, {}, true);
+
+  const auto additive_bytes = database_with_boolean_chain(2U, false, false, false, false, true);
+  ModelPackage additive_package;
+  additive_package.add(
+      Asset::copy(AssetRole::model_database, "additive-boolean.db1", additive_bytes));
+  auto additive_model = open(std::move(additive_package));
+  CHECK(additive_model.has_value(), "the additive Boolean fixture opens");
+  if (additive_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    request.topology_mode = TopologyMode::direct;
+    auto processed = additive_model.value().process(request);
+    CHECK(processed.has_value(), "the additive Boolean fixture processes");
+    float maximum_x = std::numeric_limits<float>::lowest();
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "additive Boolean batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        if (batch.value().kind != BatchKind::meshes) continue;
+        for (const auto& mesh : batch.value().meshes) {
+          if (mesh.object_id != 1201U) continue;
+          for (std::size_t coordinate = 0U; coordinate < mesh.positions.size(); coordinate += 3U) {
+            maximum_x = std::max(maximum_x, mesh.positions[coordinate]);
+          }
+        }
+      }
+    }
+    CHECK(maximum_x > 1159.0F,
+          "a persisted type-38 Boolean operand adds material beyond the host bounds");
+  }
 
   const auto swept_boolean_bytes = database_with_boolean_chain(2U, false, false, false, true);
   ModelPackage swept_boolean_package;
