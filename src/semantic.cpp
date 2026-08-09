@@ -614,7 +614,8 @@ class SemanticRelationReader final : public BatchReader {
       const auto target = read_u32(tuple, relation_offsets_[3]);
       const auto relation_id = read_u32(tuple, relation_offsets_[0]);
       if (relation_type == 7U || relation_type == 11U || relation_type == 12U ||
-          relation_type == 73U) {
+          relation_type == 73U || relation_type == 96U || relation_type == 97U ||
+          relation_type == 60005U) {
         append_subelement(source, target, SemanticRelationOrigin::stored_relation, relation_id);
       } else if (relation_type == 47U) {
         append_hosted_on(target, source, relation_id);
@@ -1609,6 +1610,281 @@ class SurfaceObjectSemanticReader final : public BatchReader {
   std::vector<PropertyView> properties_;
 };
 
+struct RebarSetAttributeData {
+  std::uint32_t bar_class = 0U;
+  std::string_view name;
+  std::string_view grade;
+  std::string_view size;
+  std::string_view finish;
+  double bending_radius = 0.0;
+  std::uint32_t start_number = 0U;
+  std::string_view prefix;
+};
+
+struct RebarSetOffsets {
+  std::uint32_t id = 0U;
+  std::uint32_t property_id = 0U;
+  const FieldSchema* layer_order = nullptr;
+  const FieldSchema* orientation_id = nullptr;
+  const FieldSchema* flags = nullptr;
+};
+
+class RebarSetSemanticReader final : public BatchReader {
+ public:
+  RebarSetSemanticReader(std::shared_ptr<const ModelStorage> storage, const TableLayout& sets,
+                         const TableSchema& schema, RebarSetOffsets offsets,
+                         std::unordered_map<std::uint32_t, RebarSetAttributeData> attributes,
+                         std::size_t set_batch_size)
+      : storage_(std::move(storage)),
+        sets_(&sets),
+        schema_(&schema),
+        offsets_(offsets),
+        attributes_(std::move(attributes)),
+        set_batch_size_(set_batch_size) {
+    properties_.reserve(set_batch_size_ * 11U);
+  }
+
+  Result<BatchView> next() override {
+    const auto payload = storage_->payload.bytes();
+    while (row_ < sets_->info.row_count) {
+      properties_.clear();
+      std::size_t set_count = 0U;
+      while (row_ < sets_->info.row_count && set_count < set_batch_size_) {
+        const auto record = sets_->record(payload, row_++);
+        if (record.empty()) {
+          return Result<BatchView>::failure(
+              {ErrorCode::invalid_container, "A rebar-set record lies outside the payload."});
+        }
+        if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+        const auto tuple = record.subspan(1U, schema_->tuple_size);
+        const auto object_id = read_u32(tuple, offsets_.id);
+        const auto attribute = attributes_.find(read_u32(tuple, offsets_.property_id));
+        if (attribute == attributes_.end()) continue;
+        const auto add_integer = [&](std::string_view name, std::uint32_t value) {
+          properties_.push_back(PropertyView{.object_id = object_id,
+                                             .group = "Tekla",
+                                             .name = name,
+                                             .kind = PropertyValueKind::integer,
+                                             .integer_value = value});
+        };
+        const auto add_optional_integer = [&](std::string_view name, const FieldSchema* field) {
+          if (field != nullptr) add_integer(name, read_u32(tuple, field->offset));
+        };
+        const auto add_text = [&](std::string_view name, std::string_view value) {
+          if (!value.empty()) {
+            properties_.push_back(PropertyView{.object_id = object_id,
+                                               .group = "Tekla",
+                                               .name = name,
+                                               .kind = PropertyValueKind::text,
+                                               .text_value = value});
+          }
+        };
+        add_integer("class", attribute->second.bar_class);
+        add_text("name", attribute->second.name);
+        add_text("grade", attribute->second.grade);
+        add_text("size", attribute->second.size);
+        add_text("finish", attribute->second.finish);
+        properties_.push_back(PropertyView{.object_id = object_id,
+                                           .group = "Tekla",
+                                           .name = "bendingRadius",
+                                           .kind = PropertyValueKind::floating,
+                                           .floating_value = attribute->second.bending_radius});
+        add_integer("startNumber", attribute->second.start_number);
+        add_text("prefix", attribute->second.prefix);
+        add_optional_integer("layerOrderNumber", offsets_.layer_order);
+        add_optional_integer("orientationId", offsets_.orientation_id);
+        add_optional_integer("flags", offsets_.flags);
+        ++set_count;
+      }
+      if (!properties_.empty()) {
+        return Result<BatchView>::success(
+            BatchView{.kind = BatchKind::properties, .properties = properties_});
+      }
+    }
+    return Result<BatchView>::success(BatchView{.kind = BatchKind::end});
+  }
+
+ private:
+  std::shared_ptr<const ModelStorage> storage_;
+  const TableLayout* sets_ = nullptr;
+  const TableSchema* schema_ = nullptr;
+  RebarSetOffsets offsets_;
+  std::unordered_map<std::uint32_t, RebarSetAttributeData> attributes_;
+  std::size_t set_batch_size_ = 0U;
+  std::uint64_t row_ = 0U;
+  std::vector<PropertyView> properties_;
+};
+
+struct RebarEndDetailOffsets {
+  std::uint32_t id = 0U;
+  std::array<std::uint32_t, 11> integers{};
+  std::uint32_t end_offset = 0U;
+};
+
+class RebarEndDetailSemanticReader final : public BatchReader {
+ public:
+  RebarEndDetailSemanticReader(std::shared_ptr<const ModelStorage> storage,
+                               const TableLayout& modifiers, const TableSchema& schema,
+                               RebarEndDetailOffsets offsets, std::size_t modifier_batch_size)
+      : storage_(std::move(storage)),
+        modifiers_(&modifiers),
+        schema_(&schema),
+        offsets_(offsets),
+        modifier_batch_size_(modifier_batch_size) {
+    properties_.reserve(modifier_batch_size_ * 12U);
+  }
+
+  Result<BatchView> next() override {
+    constexpr std::array<std::string_view, 11> names{
+        "endType",         "hookType",      "threadType",   "crankType",
+        "crankLengthType", "endOffsetType", "barsAffected", "firstAffected",
+        "followsEdges",    "applyOrder",    "flags"};
+    const auto payload = storage_->payload.bytes();
+    while (row_ < modifiers_->info.row_count) {
+      properties_.clear();
+      std::size_t modifier_count = 0U;
+      while (row_ < modifiers_->info.row_count && modifier_count < modifier_batch_size_) {
+        const auto record = modifiers_->record(payload, row_++);
+        if (record.empty()) {
+          return Result<BatchView>::failure({ErrorCode::invalid_container,
+                                             "A rebar end-detail modifier lies outside the "
+                                             "payload."});
+        }
+        if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+        const auto tuple = record.subspan(1U, schema_->tuple_size);
+        const auto object_id = read_u32(tuple, offsets_.id);
+        for (std::size_t index = 0U; index < names.size(); ++index) {
+          properties_.push_back(
+              PropertyView{.object_id = object_id,
+                           .group = "Tekla",
+                           .name = names[index],
+                           .kind = PropertyValueKind::integer,
+                           .integer_value = read_u32(tuple, offsets_.integers[index])});
+        }
+        const auto end_offset = read_f64(tuple, offsets_.end_offset);
+        if (std::isfinite(end_offset) && end_offset != -2147483648.0) {
+          properties_.push_back(PropertyView{.object_id = object_id,
+                                             .group = "Tekla",
+                                             .name = "endOffset",
+                                             .kind = PropertyValueKind::floating,
+                                             .floating_value = end_offset});
+        }
+        ++modifier_count;
+      }
+      if (!properties_.empty()) {
+        return Result<BatchView>::success(
+            BatchView{.kind = BatchKind::properties, .properties = properties_});
+      }
+    }
+    return Result<BatchView>::success(BatchView{.kind = BatchKind::end});
+  }
+
+ private:
+  std::shared_ptr<const ModelStorage> storage_;
+  const TableLayout* modifiers_ = nullptr;
+  const TableSchema* schema_ = nullptr;
+  RebarEndDetailOffsets offsets_;
+  std::size_t modifier_batch_size_ = 0U;
+  std::uint64_t row_ = 0U;
+  std::vector<PropertyView> properties_;
+};
+
+struct RebarSplitterAttributeData {
+  double lap_length = 0.0;
+  std::array<std::uint32_t, 5> leading_integers{};
+  double stagger_offset = 0.0;
+  std::uint32_t lap_side = 0U;
+  double split_offset = 0.0;
+  std::array<std::uint32_t, 4> trailing_integers{};
+};
+
+class RebarSplitterSemanticReader final : public BatchReader {
+ public:
+  RebarSplitterSemanticReader(
+      std::shared_ptr<const ModelStorage> storage, const TableLayout& modifiers,
+      const TableSchema& schema, std::uint32_t id_offset, std::uint32_t attribute_id_offset,
+      std::uint32_t apply_order_offset,
+      std::unordered_map<std::uint32_t, RebarSplitterAttributeData> attributes,
+      std::size_t modifier_batch_size)
+      : storage_(std::move(storage)),
+        modifiers_(&modifiers),
+        schema_(&schema),
+        id_offset_(id_offset),
+        attribute_id_offset_(attribute_id_offset),
+        apply_order_offset_(apply_order_offset),
+        attributes_(std::move(attributes)),
+        modifier_batch_size_(modifier_batch_size) {
+    properties_.reserve(modifier_batch_size_ * 14U);
+  }
+
+  Result<BatchView> next() override {
+    constexpr std::array<std::string_view, 5> leading_names{
+        "barsAffected", "firstAffected", "followsEdges", "staggerType", "lapOffsetDirection"};
+    constexpr std::array<std::string_view, 4> trailing_names{"splicingType", "crankSide",
+                                                             "crankLengthType", "crankId"};
+    const auto payload = storage_->payload.bytes();
+    while (row_ < modifiers_->info.row_count) {
+      properties_.clear();
+      std::size_t modifier_count = 0U;
+      while (row_ < modifiers_->info.row_count && modifier_count < modifier_batch_size_) {
+        const auto record = modifiers_->record(payload, row_++);
+        if (record.empty()) {
+          return Result<BatchView>::failure(
+              {ErrorCode::invalid_container, "A rebar splitter lies outside the payload."});
+        }
+        if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+        const auto tuple = record.subspan(1U, schema_->tuple_size);
+        const auto attribute = attributes_.find(read_u32(tuple, attribute_id_offset_));
+        if (attribute == attributes_.end()) continue;
+        const auto object_id = read_u32(tuple, id_offset_);
+        const auto add_integer = [&](std::string_view name, std::uint32_t value) {
+          properties_.push_back(PropertyView{.object_id = object_id,
+                                             .group = "Tekla",
+                                             .name = name,
+                                             .kind = PropertyValueKind::integer,
+                                             .integer_value = value});
+        };
+        const auto add_floating = [&](std::string_view name, double value) {
+          properties_.push_back(PropertyView{.object_id = object_id,
+                                             .group = "Tekla",
+                                             .name = name,
+                                             .kind = PropertyValueKind::floating,
+                                             .floating_value = value});
+        };
+        add_integer("applyOrder", read_u32(tuple, apply_order_offset_));
+        add_floating("lapLength", attribute->second.lap_length);
+        for (std::size_t index = 0U; index < leading_names.size(); ++index) {
+          add_integer(leading_names[index], attribute->second.leading_integers[index]);
+        }
+        add_floating("staggerOffset", attribute->second.stagger_offset);
+        add_integer("lapSide", attribute->second.lap_side);
+        add_floating("splitOffset", attribute->second.split_offset);
+        for (std::size_t index = 0U; index < trailing_names.size(); ++index) {
+          add_integer(trailing_names[index], attribute->second.trailing_integers[index]);
+        }
+        ++modifier_count;
+      }
+      if (!properties_.empty()) {
+        return Result<BatchView>::success(
+            BatchView{.kind = BatchKind::properties, .properties = properties_});
+      }
+    }
+    return Result<BatchView>::success(BatchView{.kind = BatchKind::end});
+  }
+
+ private:
+  std::shared_ptr<const ModelStorage> storage_;
+  const TableLayout* modifiers_ = nullptr;
+  const TableSchema* schema_ = nullptr;
+  std::uint32_t id_offset_ = 0U;
+  std::uint32_t attribute_id_offset_ = 0U;
+  std::uint32_t apply_order_offset_ = 0U;
+  std::unordered_map<std::uint32_t, RebarSplitterAttributeData> attributes_;
+  std::size_t modifier_batch_size_ = 0U;
+  std::uint64_t row_ = 0U;
+  std::vector<PropertyView> properties_;
+};
+
 struct PourObjectOffsets {
   std::uint32_t id = 0U;
   std::uint32_t object_class = 0U;
@@ -2138,6 +2414,194 @@ class RebarSemanticReader final : public BatchReader {
       batch_size_for(request, 512U)));
 }
 
+[[nodiscard]] const TableSchema* find_rebar_set_table(const ModelStorage& storage,
+                                                      const Schema& schema) {
+  constexpr std::array<std::string_view, 6> names{"rebarset",         "old_rebarset_961",
+                                                  "old_rebarset_918", "old_rebarset_908",
+                                                  "old_rebarset_839", "old_rebarset_799"};
+  for (const auto name : names) {
+    const auto* table = schema.find_table(name);
+    if (table != nullptr && table->ordinal < storage.layout.tables.size() &&
+        storage.layout.tables[table->ordinal].info.row_count != 0U) {
+      return table;
+    }
+  }
+  return nullptr;
+}
+
+[[nodiscard]] Result<ProcessStream> make_rebar_set_semantic_stream(
+    std::shared_ptr<const ModelStorage> storage, const Schema& schema,
+    const ProcessRequest& request) {
+  const auto* sets = find_rebar_set_table(*storage, schema);
+  const auto* attributes = schema.find_table("rebarset_prop");
+  if (sets == nullptr || attributes == nullptr ||
+      attributes->ordinal >= storage->layout.tables.size()) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The rebar-set semantic tables are unavailable."});
+  }
+  auto id = required_field(schema, *sets, "id", FieldType::u32);
+  auto property_id = required_field(schema, *sets, "prop_id", FieldType::u32);
+  auto attribute_id = required_field(schema, *attributes, "id", FieldType::u32);
+  auto bar_class = required_field(schema, *attributes, "bar_class", FieldType::u32);
+  auto name_id = required_field(schema, *attributes, "name_id", FieldType::u32);
+  auto grade_id = required_field(schema, *attributes, "grade_id", FieldType::u32);
+  auto size_id = required_field(schema, *attributes, "size_id", FieldType::u32);
+  auto finish_id = required_field(schema, *attributes, "finish_id", FieldType::u32);
+  auto bending_radius = required_field(schema, *attributes, "bending_radius", FieldType::f64);
+  auto start_number = required_field(schema, *attributes, "start_number", FieldType::u32);
+  auto prefix = required_field(schema, *attributes, "prefix", FieldType::text);
+  if (!id || !property_id || !attribute_id || !bar_class || !name_id || !grade_id || !size_id ||
+      !finish_id || !bending_radius || !start_number || !prefix) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The rebar-set semantic layout is incomplete."});
+  }
+  const auto strings = load_strings(*storage, schema);
+  const auto string_value = [&](std::uint32_t key) -> std::string_view {
+    const auto found = strings.find(key);
+    return found == strings.end() ? std::string_view{} : found->second;
+  };
+  std::unordered_map<std::uint32_t, RebarSetAttributeData> decoded;
+  const auto& attribute_layout = storage->layout.tables[attributes->ordinal];
+  decoded.reserve(static_cast<std::size_t>(attribute_layout.info.row_count));
+  for (std::uint64_t row = 0U; row < attribute_layout.info.row_count; ++row) {
+    const auto record = attribute_layout.record(storage->payload.bytes(), row);
+    if (record.empty()) {
+      return Result<ProcessStream>::failure(
+          {ErrorCode::invalid_container, "A rebar-set property lies outside the payload."});
+    }
+    if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+    const auto tuple = record.subspan(1U, attributes->tuple_size);
+    decoded.insert_or_assign(
+        read_u32(tuple, attribute_id.value()->offset),
+        RebarSetAttributeData{
+            .bar_class = read_u32(tuple, bar_class.value()->offset),
+            .name = string_value(read_u32(tuple, name_id.value()->offset)),
+            .grade = string_value(read_u32(tuple, grade_id.value()->offset)),
+            .size = string_value(read_u32(tuple, size_id.value()->offset)),
+            .finish = string_value(read_u32(tuple, finish_id.value()->offset)),
+            .bending_radius = read_f64(tuple, bending_radius.value()->offset),
+            .start_number = read_u32(tuple, start_number.value()->offset),
+            .prefix = read_text(tuple, prefix.value()->offset, prefix.value()->size)});
+  }
+  const auto optional_u32 = [&](std::string_view name) -> const FieldSchema* {
+    const auto* field = find_field(schema, *sets, name);
+    return field != nullptr && field->type == FieldType::u32 &&
+                   field->offset + field->size <= sets->tuple_size
+               ? field
+               : nullptr;
+  };
+  return Result<ProcessStream>::success(std::make_unique<RebarSetSemanticReader>(
+      storage, storage->layout.tables[sets->ordinal], *sets,
+      RebarSetOffsets{.id = id.value()->offset,
+                      .property_id = property_id.value()->offset,
+                      .layer_order = optional_u32("layer_order_number"),
+                      .orientation_id = optional_u32("orientation_id"),
+                      .flags = optional_u32("flags")},
+      std::move(decoded), batch_size_for(request, sizeof(PropertyView) * 11U)));
+}
+
+[[nodiscard]] Result<ProcessStream> make_rebar_end_detail_semantic_stream(
+    std::shared_ptr<const ModelStorage> storage, const Schema& schema,
+    const ProcessRequest& request) {
+  const auto* table = schema.find_table("rebarset_end_detail_strip");
+  if (table == nullptr || table->ordinal >= storage->layout.tables.size()) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The rebar end-detail table is unavailable."});
+  }
+  constexpr std::array<std::string_view, 11> names{
+      "end_type",          "hook_type",          "thread_type",   "crank_type",
+      "crank_length_type", "end_offset_type",    "bars_affected", "first_affected",
+      "follows_edges",     "apply_order_number", "flags"};
+  auto id = required_field(schema, *table, "id", FieldType::u32);
+  auto end_offset = required_field(schema, *table, "end_offset", FieldType::f64);
+  std::array<std::uint32_t, names.size()> offsets{};
+  if (!id || !end_offset) {
+    return Result<ProcessStream>::failure(!id ? id.error() : end_offset.error());
+  }
+  for (std::size_t index = 0U; index < names.size(); ++index) {
+    auto field = required_field(schema, *table, names[index], FieldType::u32);
+    if (!field) return Result<ProcessStream>::failure(field.error());
+    offsets[index] = field.value()->offset;
+  }
+  return Result<ProcessStream>::success(std::make_unique<RebarEndDetailSemanticReader>(
+      storage, storage->layout.tables[table->ordinal], *table,
+      RebarEndDetailOffsets{
+          .id = id.value()->offset, .integers = offsets, .end_offset = end_offset.value()->offset},
+      batch_size_for(request, sizeof(PropertyView) * 12U)));
+}
+
+[[nodiscard]] Result<ProcessStream> make_rebar_splitter_semantic_stream(
+    std::shared_ptr<const ModelStorage> storage, const Schema& schema,
+    const ProcessRequest& request) {
+  const auto* table = schema.find_table("rebarset_splitter");
+  const auto* attributes = schema.find_table("rebarset_splitter_attr");
+  if (table == nullptr || attributes == nullptr ||
+      table->ordinal >= storage->layout.tables.size() ||
+      attributes->ordinal >= storage->layout.tables.size()) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The rebar-splitter semantic tables are unavailable."});
+  }
+  auto id = required_field(schema, *table, "id", FieldType::u32);
+  auto attribute_id = required_field(schema, *table, "attr_id", FieldType::u32);
+  auto apply_order = required_field(schema, *table, "apply_order_number", FieldType::u32);
+  auto attribute_key = required_field(schema, *attributes, "id", FieldType::u32);
+  constexpr std::array<std::string_view, 5> leading_names{
+      "bars_affected", "first_affected", "follows_edges", "stagger_type", "lap_offset_dir"};
+  constexpr std::array<std::string_view, 4> trailing_names{"splicing_type", "crank_side",
+                                                           "crank_length_type", "crank_id"};
+  std::array<std::uint32_t, leading_names.size()> leading_offsets{};
+  std::array<std::uint32_t, trailing_names.size()> trailing_offsets{};
+  auto lap_length = required_field(schema, *attributes, "lap_length", FieldType::f64);
+  auto stagger_offset = required_field(schema, *attributes, "stagger_offset", FieldType::f64);
+  auto lap_side = required_field(schema, *attributes, "lap_side", FieldType::u32);
+  auto split_offset = required_field(schema, *attributes, "split_offset", FieldType::f64);
+  if (!id || !attribute_id || !apply_order || !attribute_key || !lap_length || !stagger_offset ||
+      !lap_side || !split_offset) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The rebar-splitter semantic layout is incomplete."});
+  }
+  for (std::size_t index = 0U; index < leading_names.size(); ++index) {
+    auto field = required_field(schema, *attributes, leading_names[index], FieldType::u32);
+    if (!field) return Result<ProcessStream>::failure(field.error());
+    leading_offsets[index] = field.value()->offset;
+  }
+  for (std::size_t index = 0U; index < trailing_names.size(); ++index) {
+    auto field = required_field(schema, *attributes, trailing_names[index], FieldType::u32);
+    if (!field) return Result<ProcessStream>::failure(field.error());
+    trailing_offsets[index] = field.value()->offset;
+  }
+  std::unordered_map<std::uint32_t, RebarSplitterAttributeData> decoded;
+  const auto& layout = storage->layout.tables[attributes->ordinal];
+  decoded.reserve(static_cast<std::size_t>(layout.info.row_count));
+  for (std::uint64_t row = 0U; row < layout.info.row_count; ++row) {
+    const auto record = layout.record(storage->payload.bytes(), row);
+    if (record.empty()) {
+      return Result<ProcessStream>::failure(
+          {ErrorCode::invalid_container, "A rebar-splitter property lies outside the payload."});
+    }
+    if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+    const auto tuple = record.subspan(1U, attributes->tuple_size);
+    std::array<std::uint32_t, leading_names.size()> leading{};
+    std::array<std::uint32_t, trailing_names.size()> trailing{};
+    for (std::size_t index = 0U; index < leading.size(); ++index)
+      leading[index] = read_u32(tuple, leading_offsets[index]);
+    for (std::size_t index = 0U; index < trailing.size(); ++index)
+      trailing[index] = read_u32(tuple, trailing_offsets[index]);
+    decoded.insert_or_assign(read_u32(tuple, attribute_key.value()->offset),
+                             RebarSplitterAttributeData{
+                                 .lap_length = read_f64(tuple, lap_length.value()->offset),
+                                 .leading_integers = leading,
+                                 .stagger_offset = read_f64(tuple, stagger_offset.value()->offset),
+                                 .lap_side = read_u32(tuple, lap_side.value()->offset),
+                                 .split_offset = read_f64(tuple, split_offset.value()->offset),
+                                 .trailing_integers = trailing});
+  }
+  return Result<ProcessStream>::success(std::make_unique<RebarSplitterSemanticReader>(
+      storage, storage->layout.tables[table->ordinal], *table, id.value()->offset,
+      attribute_id.value()->offset, apply_order.value()->offset, std::move(decoded),
+      batch_size_for(request, sizeof(PropertyView) * 14U)));
+}
+
 [[nodiscard]] Result<ProcessStream> make_pour_object_semantic_stream(
     std::shared_ptr<const ModelStorage> storage, const Schema& schema,
     const ProcessRequest& request) {
@@ -2576,6 +3040,25 @@ Result<ProcessStream> make_property_stream(std::shared_ptr<const ModelStorage> s
     auto surface_objects = make_surface_object_semantic_stream(storage, schema, request);
     if (!surface_objects) return Result<ProcessStream>::failure(surface_objects.error());
     streams.push_back(std::move(surface_objects.value()));
+  }
+  if (find_rebar_set_table(*storage, schema) != nullptr) {
+    auto rebar_sets = make_rebar_set_semantic_stream(storage, schema, request);
+    if (!rebar_sets) return Result<ProcessStream>::failure(rebar_sets.error());
+    streams.push_back(std::move(rebar_sets.value()));
+  }
+  const auto* rebar_end_details = schema.find_table("rebarset_end_detail_strip");
+  if (rebar_end_details != nullptr && rebar_end_details->ordinal < storage->layout.tables.size() &&
+      storage->layout.tables[rebar_end_details->ordinal].info.row_count != 0U) {
+    auto end_details = make_rebar_end_detail_semantic_stream(storage, schema, request);
+    if (!end_details) return Result<ProcessStream>::failure(end_details.error());
+    streams.push_back(std::move(end_details.value()));
+  }
+  const auto* rebar_splitters = schema.find_table("rebarset_splitter");
+  if (rebar_splitters != nullptr && rebar_splitters->ordinal < storage->layout.tables.size() &&
+      storage->layout.tables[rebar_splitters->ordinal].info.row_count != 0U) {
+    auto splitters = make_rebar_splitter_semantic_stream(storage, schema, request);
+    if (!splitters) return Result<ProcessStream>::failure(splitters.error());
+    streams.push_back(std::move(splitters.value()));
   }
   const auto* pour_object_schema = schema.find_table("pour_object");
   if (pour_object_schema != nullptr &&

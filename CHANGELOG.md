@@ -8,6 +8,9 @@ compatibility policy in the support matrix.
 
 ### Added
 
+- Persisted rebar sets, generated groups, end-detail modifiers, and splitters
+  expose stable identities, stored reinforcement and modifier properties, and
+  deterministic owner-child relationships.
 - Persisted surface objects expose stable identities, stored surface properties,
   and deterministic host-part relationships.
 - Persisted rebar splices expose stable identities, splice dimensions and

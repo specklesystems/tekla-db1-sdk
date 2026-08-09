@@ -164,10 +164,14 @@ ObjectKind object_kind(std::uint32_t type, std::uint32_t subtype) noexcept {
     if (subtype == 0U) return ObjectKind::single_rebar;
     if (subtype == 1U) return ObjectKind::rebar_group;
     if (subtype == 6U || subtype == 8U) return ObjectKind::rebar_mesh;
+    if (subtype == 9U) return ObjectKind::rebar_set;
   }
   if (type == 73U && subtype == 3U) return ObjectKind::surface_treatment;
   if (type == 74U && subtype == 0U) return ObjectKind::rebar_splice;
+  if (type == 96U && subtype == 1U) return ObjectKind::rebar_end_detail_modifier;
+  if (type == 96U && subtype == 3U) return ObjectKind::rebar_splitter;
   if (type == 97U && subtype == 1U) return ObjectKind::surface_object;
+  if (type == 10247U && subtype == 0U) return ObjectKind::rebar_set_group;
   if (type == 90U && subtype == 0U) return ObjectKind::pour_object;
   if (type == 101U && subtype == 0U) return ObjectKind::pour_unit;
   return ObjectKind::unknown;
