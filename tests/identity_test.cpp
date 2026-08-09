@@ -4444,8 +4444,8 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
       auto batch = processed.value()->next();
       CHECK(batch.has_value() && batch.value().kind == BatchKind::meshes &&
                 batch.value().meshes.size() == 1 &&
-                batch.value().meshes.front().positions.size() == 450 &&
-                batch.value().meshes.front().indices.size() == 888,
+                batch.value().meshes.front().positions.size() == 432 &&
+                batch.value().meshes.front().indices.size() == 852,
             "a rounded persisted contour becomes a closed plate mesh");
     }
   }

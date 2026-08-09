@@ -1195,6 +1195,13 @@ void set_tapered_section_metrics(DefinitionGeometryView& definition,
          cross2(c, a, point) >= epsilon;
 }
 
+[[nodiscard]] std::size_t curve_segment_count(double sweep, double maximum_step) noexcept {
+  constexpr double integral_ratio_tolerance = 1.0e-12;
+  const double ratio = std::abs(sweep) / maximum_step;
+  return std::max<std::size_t>(
+      2U, static_cast<std::size_t>(std::ceil(ratio - integral_ratio_tolerance)));
+}
+
 [[nodiscard]] std::optional<std::vector<std::array<std::uint32_t, 3>>> triangulate(
     std::span<const std::array<double, 2>> points) {
   if (points.size() < 3) return std::nullopt;
@@ -1297,8 +1304,7 @@ void set_tapered_section_metrics(DefinitionGeometryView& definition,
       const double sweep =
           control_delta <= end_delta ? end_delta : end_delta - 2.0 * std::numbers::pi;
       constexpr double maximum_step = 5.0 * std::numbers::pi / 180.0;
-      const auto steps = std::max<std::size_t>(
-          2U, static_cast<std::size_t>(std::ceil(std::abs(sweep) / maximum_step)));
+      const auto steps = curve_segment_count(sweep, maximum_step);
       const double radius = std::hypot(start.x - center[0], start.y - center[1]);
       for (std::size_t step = 1; step < steps; ++step) {
         const double sampled_angle =
@@ -1387,8 +1393,8 @@ void set_tapered_section_metrics(DefinitionGeometryView& definition,
       while (end_angle >= start_angle) end_angle -= 2.0 * std::numbers::pi;
     }
     const double sweep = end_angle - start_angle;
-    const std::size_t segments = std::max<std::size_t>(
-        2, static_cast<std::size_t>(std::ceil(std::abs(sweep) / (5.0 * std::numbers::pi / 180.0))));
+    constexpr double maximum_step = 5.0 * std::numbers::pi / 180.0;
+    const std::size_t segments = curve_segment_count(sweep, maximum_step);
     for (std::size_t step = 0; step <= segments; ++step) {
       const double sample =
           start_angle + sweep * static_cast<double>(step) / static_cast<double>(segments);
