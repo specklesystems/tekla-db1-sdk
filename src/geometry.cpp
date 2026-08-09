@@ -1,13 +1,14 @@
 #include "geometry.hpp"
 
 #include "geometry_recipe.hpp"
+#include "mesh_placement.hpp"
 #include "profile.hpp"
 #include "record.hpp"
 #include "shape.hpp"
 #include "standard_profile.hpp"
 #if defined(TEKLA_DB1_HAS_OCCT)
+#include "geometry_evaluation_cache.hpp"
 #include "occt/occt.hpp"
-#include "occt/protocol.hpp"
 #endif
 
 #include <algorithm>
@@ -80,6 +81,7 @@ struct MeshData {
   // conversion happens only after every persisted operation has been replayed.
   std::vector<double> positions;
   std::vector<std::uint32_t> indices;
+  std::optional<RigidPlacementView> placement;
   std::optional<RuledSweepRecipe> ruled_sweep_recipe;
   Vector3d longitudinal_axis{1.0, 0.0, 0.0};
   Vector3d section_origin;
@@ -123,6 +125,12 @@ struct Section {
 struct TaperedSection {
   std::vector<std::array<double, 2>> start;
   std::vector<std::array<double, 2>> end;
+};
+
+struct ParametricRoundProfile {
+  std::vector<std::array<double, 2>> outer;
+  std::vector<std::array<double, 2>> inner;
+  double nominal_radius = 0.0;
 };
 
 struct TaperedIParameters {
@@ -729,7 +737,7 @@ struct Contour {
                    .circular_inner_radius = values[0] / 2.0 - values[1]};
   }
   if (profile.starts_with("O")) {
-    const auto values = dimensions(std::string_view(profile).substr(1), "-");
+    const auto values = dimensions(std::string_view(profile).substr(1), "*Xx-");
     if (values.size() == 2U && values[0] > 2.0 * values[1]) {
       const auto segments = round_segment_count(values[0]);
       return Section{.kind = Section::Kind::hollow,
@@ -738,6 +746,16 @@ struct Contour {
                      .circular_outer_radius = values[0] / 2.0,
                      .circular_inner_radius = values[0] / 2.0 - values[1]};
     }
+  }
+  if (profile.starts_with("SPD")) {
+    const auto values = dimensions(std::string_view(profile).substr(3));
+    if (values.size() != 2U || values[0] <= 2.0 * values[1]) return std::nullopt;
+    const auto segments = round_segment_count(values[0]);
+    return Section{.kind = Section::Kind::hollow,
+                   .outer = circle(values[0], segments),
+                   .inner = circle(values[0] - 2.0 * values[1], segments),
+                   .circular_outer_radius = values[0] / 2.0,
+                   .circular_inner_radius = values[0] / 2.0 - values[1]};
   }
   if (profile.starts_with("PD")) {
     const auto values = dimensions(std::string_view(profile).substr(2));
@@ -1177,6 +1195,13 @@ void set_tapered_section_metrics(DefinitionGeometryView& definition,
          cross2(c, a, point) >= epsilon;
 }
 
+[[nodiscard]] std::size_t curve_segment_count(double sweep, double maximum_step) noexcept {
+  constexpr double integral_ratio_tolerance = 1.0e-12;
+  const double ratio = std::abs(sweep) / maximum_step;
+  return std::max<std::size_t>(
+      2U, static_cast<std::size_t>(std::ceil(ratio - integral_ratio_tolerance)));
+}
+
 [[nodiscard]] std::optional<std::vector<std::array<std::uint32_t, 3>>> triangulate(
     std::span<const std::array<double, 2>> points) {
   if (points.size() < 3) return std::nullopt;
@@ -1223,29 +1248,33 @@ void set_tapered_section_metrics(DefinitionGeometryView& definition,
     return std::nullopt;
   std::vector<std::array<double, 2>> result;
   if (std::find(contour.types.begin(), contour.types.end(), 40U) != contour.types.end()) {
-    if (std::any_of(contour.types.begin(), contour.types.end(),
-                    [](std::uint32_t type) { return type != 0U && type != 40U; })) {
-      return std::nullopt;
-    }
+    // Tekla persists CHAMFER_ARC_POINT as 40 on an otherwise ordinary contour;
+    // expand only those control points so the surviving vertex chamfers still compose.
     for (std::size_t index = 0; index < contour.types.size(); ++index) {
       if (contour.types[index] == 40U &&
           contour.types[(index + contour.types.size() - 1U) % contour.types.size()] == 40U) {
         return std::nullopt;
       }
     }
-    const auto append_distinct = [&](std::array<double, 2> value) {
-      if (result.empty() ||
-          std::hypot(result.back()[0] - value[0], result.back()[1] - value[1]) > 1e-7) {
-        result.push_back(value);
+    Contour expanded;
+    const auto append_distinct = [&](Vector3d point, double dx, double dy, std::uint32_t type) {
+      if (expanded.points.empty() || std::hypot(expanded.points.back().x - point.x,
+                                                expanded.points.back().y - point.y) > 1e-7) {
+        expanded.points.push_back(point);
+        expanded.dx.push_back(dx);
+        expanded.dy.push_back(dy);
+        expanded.types.push_back(type);
       }
     };
     for (std::size_t index = 0; index < contour.points.size(); ++index) {
       if (contour.types[index] == 40U) continue;
       const auto start = contour.points[index];
-      append_distinct({start.x, start.y});
+      append_distinct(start, contour.dx[index], contour.dy[index], contour.types[index]);
       const auto control_index = (index + 1U) % contour.points.size();
       if (contour.types[control_index] != 40U) continue;
-      const auto end = contour.points[(index + 2U) % contour.points.size()];
+      const auto end_index = (index + 2U) % contour.points.size();
+      if (contour.types[end_index] == 40U) return std::nullopt;
+      const auto end = contour.points[end_index];
       const auto control = contour.points[control_index];
       const double determinant =
           2.0 * (start.x * (control.y - end.y) + control.x * (end.y - start.y) +
@@ -1275,21 +1304,25 @@ void set_tapered_section_metrics(DefinitionGeometryView& definition,
       const double sweep =
           control_delta <= end_delta ? end_delta : end_delta - 2.0 * std::numbers::pi;
       constexpr double maximum_step = 5.0 * std::numbers::pi / 180.0;
-      const auto steps = std::max<std::size_t>(
-          2U, static_cast<std::size_t>(std::ceil(std::abs(sweep) / maximum_step)));
+      const auto steps = curve_segment_count(sweep, maximum_step);
       const double radius = std::hypot(start.x - center[0], start.y - center[1]);
       for (std::size_t step = 1; step < steps; ++step) {
         const double sampled_angle =
             start_angle + sweep * static_cast<double>(step) / static_cast<double>(steps);
         append_distinct({center[0] + radius * std::cos(sampled_angle),
-                         center[1] + radius * std::sin(sampled_angle)});
+                         center[1] + radius * std::sin(sampled_angle), 0.0},
+                        0.0, 0.0, 0U);
       }
     }
-    if (result.size() > 1U && std::hypot(result.front()[0] - result.back()[0],
-                                         result.front()[1] - result.back()[1]) <= 1e-7) {
-      result.pop_back();
+    if (expanded.points.size() > 1U &&
+        std::hypot(expanded.points.front().x - expanded.points.back().x,
+                   expanded.points.front().y - expanded.points.back().y) <= 1e-7) {
+      expanded.points.pop_back();
+      expanded.dx.pop_back();
+      expanded.dy.pop_back();
+      expanded.types.pop_back();
     }
-    return result.size() >= 3U ? std::optional{std::move(result)} : std::nullopt;
+    return expanded.points.size() >= 3U ? chamfered(expanded) : std::nullopt;
   }
   for (std::size_t index = 0; index < contour.points.size(); ++index) {
     const auto point = contour.points[index];
@@ -1360,8 +1393,8 @@ void set_tapered_section_metrics(DefinitionGeometryView& definition,
       while (end_angle >= start_angle) end_angle -= 2.0 * std::numbers::pi;
     }
     const double sweep = end_angle - start_angle;
-    const std::size_t segments = std::max<std::size_t>(
-        2, static_cast<std::size_t>(std::ceil(std::abs(sweep) / (5.0 * std::numbers::pi / 180.0))));
+    constexpr double maximum_step = 5.0 * std::numbers::pi / 180.0;
+    const std::size_t segments = curve_segment_count(sweep, maximum_step);
     for (std::size_t step = 0; step <= segments; ++step) {
       const double sample =
           start_angle + sweep * static_cast<double>(step) / static_cast<double>(segments);
@@ -1549,6 +1582,152 @@ void append_vertex(MeshData& mesh, Vector3d value) {
     }
   }
   return mesh;
+}
+
+[[nodiscard]] bool is_parametric_round_profile(std::string_view raw_profile) {
+  const auto profile = uppercase(raw_profile);
+  const bool sphere = profile.starts_with("SPHERE");
+  const bool cap = profile.starts_with("CAP");
+  if (!sphere && !cap) return false;
+  const auto prefix_length =
+      sphere ? std::string_view("SPHERE").size() : std::string_view("CAP").size();
+  const auto diameter = number(std::string_view(profile).substr(prefix_length));
+  return diameter && std::isfinite(*diameter) && *diameter > 0.0;
+}
+
+[[nodiscard]] std::optional<ParametricRoundProfile> parametric_round_profile(
+    std::string_view raw_profile, double length) {
+  const auto profile = uppercase(raw_profile);
+  const bool sphere = profile.starts_with("SPHERE");
+  const bool cap = profile.starts_with("CAP");
+  if (!is_parametric_round_profile(profile) || !std::isfinite(length) || length <= 0.0) {
+    return std::nullopt;
+  }
+  const auto prefix_length =
+      sphere ? std::string_view("SPHERE").size() : std::string_view("CAP").size();
+  const auto diameter = number(std::string_view(profile).substr(prefix_length));
+
+  constexpr std::array<double, 15> locations{0.0,  0.02, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50,
+                                             0.60, 0.70, 0.80, 0.90, 0.95, 0.98, 1.0};
+  constexpr std::array<double, 15> radius_factors{0.0,  0.28,  0.436, 0.60, 0.80,  0.917, 0.98, 1.0,
+                                                  0.98, 0.917, 0.80,  0.60, 0.436, 0.28,  0.0};
+  constexpr double end_radius = 2.0;
+  constexpr double cap_thickness = 16.0;
+  // Tekla's public catalog identifies these as PROFILE_USER_PARAMETRIC
+  // subtype 999015 (SPHERE) and 999112 (CAP). The station population above,
+  // the 20-point cross sections below, and the CAP inner skin are corroborated
+  // against those catalog records and evaluated solids rather than inferred
+  // from the profile spelling alone.
+  const double radius = *diameter / 2.0;
+  if (cap && (radius <= cap_thickness || length <= 4.0 * cap_thickness)) {
+    return std::nullopt;
+  }
+
+  ParametricRoundProfile result{.nominal_radius = radius};
+  const std::size_t outer_count = cap ? 8U : locations.size();
+  result.outer.reserve(outer_count);
+  for (std::size_t index = 0; index < outer_count; ++index) {
+    result.outer.push_back(
+        {locations[index] * length, std::max(end_radius, radius_factors[index] * radius)});
+  }
+  if (!cap) return result;
+
+  const double inner_radius = radius - cap_thickness;
+  result.inner.reserve(outer_count);
+  for (std::size_t index = 0; index < outer_count; ++index) {
+    result.inner.push_back({locations[index] * length + cap_thickness,
+                            std::max(end_radius, radius_factors[index] * inner_radius)});
+  }
+  const double cap_end = length / 2.0;
+  const auto previous = result.inner[result.inner.size() - 2U];
+  const auto terminal = result.inner.back();
+  if (previous[0] >= cap_end || terminal[0] <= cap_end) return std::nullopt;
+  const double parameter = (cap_end - previous[0]) / (terminal[0] - previous[0]);
+  result.inner.back() = {cap_end, previous[1] + parameter * (terminal[1] - previous[1])};
+  return result;
+}
+
+[[nodiscard]] MeshData parametric_round_mesh(std::uint64_t object_id,
+                                             const ParametricRoundProfile& profile,
+                                             const DefinitionGeometryView& definition) {
+  constexpr std::uint32_t segment_count = 20U;
+  constexpr std::array<std::array<double, 2>, segment_count> circle{{
+      {1.0, 0.0},  {0.951, 0.309},   {0.809, 0.588},   {0.588, 0.809},   {0.309, 0.951},
+      {0.0, 1.0},  {-0.309, 0.951},  {-0.588, 0.809},  {-0.809, 0.588},  {-0.951, 0.309},
+      {-1.0, 0.0}, {-0.951, -0.309}, {-0.809, -0.588}, {-0.588, -0.809}, {-0.309, -0.951},
+      {0.0, -1.0}, {0.309, -0.951},  {0.588, -0.809},  {0.809, -0.588},  {0.951, -0.309},
+  }};
+  constexpr std::array<std::array<double, 2>, segment_count> end_circle{{
+      {1.0, 0.0},  {0.95, 0.31},   {0.81, 0.59},   {0.59, 0.81},   {0.31, 0.95},
+      {0.0, 1.0},  {-0.31, 0.95},  {-0.59, 0.81},  {-0.81, 0.59},  {-0.95, 0.31},
+      {-1.0, 0.0}, {-0.95, -0.31}, {-0.81, -0.59}, {-0.59, -0.81}, {-0.31, -0.95},
+      {0.0, -1.0}, {0.31, -0.95},  {0.59, -0.81},  {0.81, -0.59},  {0.95, -0.31},
+  }};
+  MeshData mesh{.object_id = object_id};
+  const auto append_rings = [&](const std::vector<std::array<double, 2>>& rings) {
+    for (const auto [station, radius] : rings) {
+      const auto& coordinates = radius <= 2.0 + 1.0e-12 ? end_circle : circle;
+      for (std::uint32_t segment = 0; segment < segment_count; ++segment) {
+        append_vertex(mesh, point(definition.origin, definition.x_axis, definition.y_axis,
+                                  definition.z_axis, station, radius * coordinates[segment][0],
+                                  radius * coordinates[segment][1]));
+      }
+    }
+  };
+  append_rings(profile.outer);
+  append_rings(profile.inner);
+
+  const auto quad = [&](std::uint32_t a, std::uint32_t b, std::uint32_t c, std::uint32_t d) {
+    mesh.indices.insert(mesh.indices.end(), {a, b, c, a, c, d});
+  };
+  const auto connect_rings = [&](std::uint32_t base, std::size_t ring_count, bool reverse) {
+    for (std::uint32_t ring = 0; ring + 1U < ring_count; ++ring) {
+      const auto current = base + ring * segment_count;
+      const auto following = current + segment_count;
+      for (std::uint32_t segment = 0; segment < segment_count; ++segment) {
+        const auto next = (segment + 1U) % segment_count;
+        if (reverse) {
+          quad(current + next, current + segment, following + segment, following + next);
+        } else {
+          quad(current + segment, current + next, following + next, following + segment);
+        }
+      }
+    }
+  };
+  connect_rings(0U, profile.outer.size(), false);
+
+  if (profile.inner.empty()) {
+    const auto last = static_cast<std::uint32_t>(profile.outer.size() - 1U) * segment_count;
+    for (std::uint32_t segment = 1U; segment + 1U < segment_count; ++segment) {
+      mesh.indices.insert(mesh.indices.end(), {0U, segment + 1U, segment});
+      mesh.indices.insert(mesh.indices.end(), {last, last + segment, last + segment + 1U});
+    }
+    return mesh;
+  }
+
+  const auto inner_base = static_cast<std::uint32_t>(profile.outer.size()) * segment_count;
+  connect_rings(inner_base, profile.inner.size(), true);
+  const auto outer_end = static_cast<std::uint32_t>(profile.outer.size() - 1U) * segment_count;
+  const auto inner_end =
+      inner_base + static_cast<std::uint32_t>(profile.inner.size() - 1U) * segment_count;
+  for (std::uint32_t segment = 0; segment < segment_count; ++segment) {
+    const auto next = (segment + 1U) % segment_count;
+    quad(segment, next, inner_base + next, inner_base + segment);
+    quad(outer_end + next, outer_end + segment, inner_end + segment, inner_end + next);
+  }
+  return mesh;
+}
+
+[[nodiscard]] Section nominal_parametric_round_section(const ParametricRoundProfile& profile) {
+  Section result{.kind = profile.inner.empty() ? Section::Kind::solid : Section::Kind::hollow,
+                 .outer = circle(profile.nominal_radius * 2.0, 20),
+                 .circular_outer_radius = profile.nominal_radius};
+  if (!profile.inner.empty()) {
+    const double inner_radius = profile.nominal_radius - 16.0;
+    result.inner = circle(inner_radius * 2.0, 20);
+    result.circular_inner_radius = inner_radius;
+  }
+  return result;
 }
 
 [[nodiscard]] std::optional<MeshData> loft_plate(std::uint64_t object_id,
@@ -2011,8 +2190,9 @@ class GeometryReader final : public BatchReader {
                  LocalProfileCatalog profiles, ShapeCatalog shapes,
                  std::array<std::uint32_t, 9> offsets, bool emit_definitions, bool emit_meshes,
                  std::size_t batch_size, TopologyMode topology_mode,
-                 std::string topology_worker_path, std::uint32_t topology_timeout_milliseconds,
-                 std::uint64_t object_id_min, std::uint64_t object_id_max)
+                 MeshCoordinateMode mesh_coordinate_mode, std::string topology_worker_path,
+                 std::uint32_t topology_timeout_milliseconds, std::uint64_t object_id_min,
+                 std::uint64_t object_id_max)
       : storage_(std::move(storage)),
         parts_(&parts),
         part_schema_(&part_schema),
@@ -2034,6 +2214,7 @@ class GeometryReader final : public BatchReader {
         emit_meshes_(emit_meshes),
         batch_size_(batch_size),
         topology_mode_(topology_mode),
+        mesh_coordinate_mode_(mesh_coordinate_mode),
         object_id_min_(object_id_min),
         object_id_max_(object_id_max) {
 #if defined(TEKLA_DB1_HAS_OCCT)
@@ -2234,6 +2415,11 @@ class GeometryReader final : public BatchReader {
         } else if (auto tapered = tapered_ellipse(definition.profile)) {
           set_tapered_section_metrics(definitions_.back(), *tapered);
           mesh_data_.push_back(loft(object_id, *tapered, definition));
+        } else if (auto parametric =
+                       parametric_round_profile(definition.profile, definition.length)) {
+          auto nominal = nominal_parametric_round_section(*parametric);
+          set_section_metrics(definitions_.back(), nominal);
+          mesh_data_.push_back(parametric_round_mesh(object_id, *parametric, definition));
         } else if (auto analytic = parse_section(definition.profile);
                    analytic || profiles_.find(definition.profile) != nullptr) {
           Section section;
@@ -2294,19 +2480,21 @@ class GeometryReader final : public BatchReader {
                "The profile section is not available to the analytic evaluator."});
         }
         if (mesh_data_.size() != mesh_count_before) {
-          apply_operations(object_id, mesh_data_.back());
+          apply_operations(object_id, mesh_data_.back(), definition);
           mesh_data_.back().longitudinal_axis = definition.x_axis;
+          mesh_data_.back().placement = RigidPlacementView{definition.origin, definition.x_axis,
+                                                           definition.y_axis, definition.z_axis};
         }
       }
       ++count;
     }
     for (const auto& mesh : mesh_data_) {
-      auto& positions = mesh_positions_.emplace_back();
-      positions.reserve(mesh.positions.size());
-      for (const auto value : mesh.positions) {
-        positions.push_back(static_cast<float>(value));
-      }
       const auto metrics = report_metrics(mesh, mesh.longitudinal_axis);
+      auto projected =
+          project_mesh_positions(mesh.positions, mesh_coordinate_mode_, mesh.placement);
+      const auto coordinate_space = projected.coordinate_space;
+      const auto placement = projected.placement;
+      auto& positions = mesh_positions_.emplace_back(std::move(projected.positions));
       meshes_.push_back(
           MeshView{.object_id = mesh.object_id,
                    .positions = positions,
@@ -2322,7 +2510,9 @@ class GeometryReader final : public BatchReader {
                    .section_z_max = metrics.section_z_max,
                    .has_report_metrics = metrics.valid,
                    .has_cover_surface_area = metrics.valid && metrics.has_cover_surface_area,
-                   .has_section_extents = metrics.valid && metrics.has_section_extents});
+                   .has_section_extents = metrics.valid && metrics.has_section_extents,
+                   .coordinate_space = coordinate_space,
+                   .placement = placement});
     }
     if (emit_definitions_ && !definitions_.empty())
       return Result<BatchView>::success(
@@ -2552,6 +2742,9 @@ class GeometryReader final : public BatchReader {
     }
     if (auto tapered = tapered_ellipse(definition.profile)) {
       return loft(object_id, *tapered, definition);
+    }
+    if (auto parametric = parametric_round_profile(definition.profile, definition.length)) {
+      return parametric_round_mesh(object_id, *parametric, definition);
     }
     auto analytic = parse_section(definition.profile);
     Section section;
@@ -3299,6 +3492,12 @@ class GeometryReader final : public BatchReader {
     const auto basis = axes_.find(read_u32(tuple, offsets_[2]));
     if (attribute == attributes_.end() || basis == axes_.end()) return;
     const auto form_type = attribute->second.form_type;
+    if (is_parametric_round_profile(attribute->second.profile)) {
+      // CAP/SPHERE rings are axial profile stations, not the two end rings of
+      // a prism. Extending their tiny terminal rings changes the persisted
+      // ellipsoid before its transverse cut/add operations are evaluated.
+      return;
+    }
     if (form_type == 2U || form_type == 4U || form_type == 8U || form_type == 44U ||
         form_type == 62U || form_type == 64U || form_type == 74U || form_type == 82U ||
         form_type == 105U || form_type == 115U || legacy_arc(attribute->second.object_class)) {
@@ -3420,8 +3619,6 @@ class GeometryReader final : public BatchReader {
   static constexpr std::size_t maximum_operation_graph_edges = 65'536U;
   static constexpr std::size_t maximum_operative_cache_entries = 4096U;
   static constexpr std::size_t maximum_operative_cache_bytes = 256U * 1024U * 1024U;
-  static constexpr std::size_t maximum_topology_result_cache_entries = 4096U;
-  static constexpr std::size_t maximum_topology_result_cache_bytes = 256U * 1024U * 1024U;
   static constexpr std::size_t maximum_topology_request_mesh_bytes = 256U * 1024U * 1024U;
   static constexpr double operative_linear_deflection = 0.5;
   static constexpr double operative_angular_deflection = 0.5;
@@ -3481,22 +3678,6 @@ class GeometryReader final : public BatchReader {
   struct OperativeCacheEntry {
     std::optional<MeshData> mesh;
     std::optional<Error> failure;
-  };
-
-  struct TopologyResultCacheKeyHash {
-    std::size_t operator()(const std::vector<std::byte>& bytes) const noexcept {
-      std::uint64_t value = 0xcbf29ce484222325ULL;
-      for (const auto byte : bytes) {
-        value ^= std::to_integer<std::uint8_t>(byte);
-        value *= 0x100000001b3ULL;
-      }
-      return static_cast<std::size_t>(value ^ (value >> 32U));
-    }
-  };
-
-  struct TopologyResultCacheEntry {
-    std::array<double, 3> origin{};
-    OcctMesh mesh;
   };
 
   struct MeshBounds {
@@ -3677,52 +3858,6 @@ class GeometryReader final : public BatchReader {
     operative_cache_bytes_ += bytes;
   }
 
-  [[nodiscard]] std::optional<OcctMesh> cached_topology_result(
-      const TranslationNormalizedOcctRequest& key, std::uint64_t object_id) const {
-    if (std::getenv("TEKLA_DB1_DISABLE_OCCT_CACHE") != nullptr) return std::nullopt;
-    const auto found = topology_result_cache_.find(key.bytes);
-    if (found == topology_result_cache_.end()) return std::nullopt;
-    OcctMesh mesh = found->second.mesh;
-    mesh.object_id = object_id;
-    for (std::size_t index = 0U; index + 2U < mesh.positions.size(); index += 3U) {
-      for (std::size_t axis = 0U; axis < 3U; ++axis) {
-        const double translated = static_cast<double>(mesh.positions[index + axis]) +
-                                  key.origin[axis] - found->second.origin[axis];
-        mesh.positions[index + axis] = static_cast<float>(translated);
-      }
-    }
-    if (std::getenv("TEKLA_DB1_OCCT_CACHE_PROFILE") != nullptr) {
-      std::fprintf(stderr,
-                   "{\"occt_cache\":true,\"object_id\":%llu,\"outcome\":\"hit\","
-                   "\"key_bytes\":%zu}\n",
-                   static_cast<unsigned long long>(object_id), key.bytes.size());
-    }
-    return mesh;
-  }
-
-  void cache_topology_result(TranslationNormalizedOcctRequest key, const OcctMesh& mesh) {
-    if (std::getenv("TEKLA_DB1_DISABLE_OCCT_CACHE") != nullptr) return;
-    const std::size_t bytes = key.bytes.size() + mesh.positions.size() * sizeof(float) +
-                              mesh.indices.size() * sizeof(std::uint32_t) +
-                              sizeof(TopologyResultCacheEntry);
-    if (topology_result_cache_.size() >= maximum_topology_result_cache_entries ||
-        bytes > maximum_topology_result_cache_bytes - topology_result_cache_bytes_) {
-      return;
-    }
-    TopologyResultCacheEntry entry{key.origin, mesh};
-    const bool inserted =
-        topology_result_cache_.emplace(std::move(key.bytes), std::move(entry)).second;
-    if (!inserted) return;
-    topology_result_cache_bytes_ += bytes;
-    if (std::getenv("TEKLA_DB1_OCCT_CACHE_PROFILE") != nullptr) {
-      std::fprintf(stderr,
-                   "{\"occt_cache\":true,\"object_id\":%llu,\"outcome\":\"insert\","
-                   "\"entry_bytes\":%zu,\"total_bytes\":%zu}\n",
-                   static_cast<unsigned long long>(mesh.object_id), bytes,
-                   topology_result_cache_bytes_);
-    }
-  }
-
   [[nodiscard]] static bool context_independent_failure(ErrorCode code) noexcept {
     // A resource limit can describe either a deterministic graph bound or a
     // transient evaluator allocation failure. The public error code does not
@@ -3859,42 +3994,81 @@ class GeometryReader final : public BatchReader {
     const Vector3d midpoint = scale(add(minimum, maximum), 0.5);
     const MeshBounds host_bounds{minimum, maximum};
 
-    struct BooleanCutter {
+    struct BooleanOperand {
       std::uint32_t object_id = 0U;
       MeshData mesh;
       std::optional<ExtrusionRecipe> semantic_recipe;
       double volume = 0.0;
     };
-    std::vector<BooleanCutter> cutters;
+    std::vector<BooleanOperand> additions;
+    std::vector<BooleanOperand> cutters;
+    MeshBounds boolean_bounds = host_bounds;
+    const auto operand_object_type = [&](std::uint32_t target_id) {
+      const auto row = part_rows_.find(target_id);
+      if (row == part_rows_.end()) return 0U;
+      const auto record = parts_->record(storage_->payload.bytes(), row->second);
+      if (record.empty()) return 0U;
+      const auto tuple = record.subspan(1, part_schema_->tuple_size);
+      const auto attribute = attributes_.find(read_u32(tuple, offsets_[1]));
+      return attribute == attributes_.end() ? 0U : attribute->second.object_type;
+    };
     std::unordered_set<std::uint32_t> boolean_targets;
     for (const auto& operation : found->second) {
-      if (operation.type != 11U || !replay_boolean_children ||
+      const bool boolean_operation =
+          operation.type == 11U || operation.type == 38U || operation.type == 39U;
+      if (!boolean_operation || !replay_boolean_children ||
           !boolean_targets.insert(operation.target_id).second)
         continue;
-      auto cutter = operative_mesh(operation.target_id, 0.0, true);
-      if (!cutter) {
+      const bool addition =
+          operation.type == 38U || operand_object_type(operation.target_id) == 38U;
+      auto operand = operative_mesh(operation.target_id, 0.0, !addition);
+      if (!operand) {
         ++graph.partial_results;
         add_diagnostic(ErrorCode::invalid_geometry, object_id,
                        "Boolean operative " + std::to_string(operation.target_id) +
                            " was omitted: its persisted geometry is incomplete.");
         continue;
       }
-      // All persisted child operations are subtractive or clipping, so they
-      // can only shrink this raw operative. A disjoint raw envelope therefore
-      // cannot affect the host and need not enter OCCT at all. This matters for
-      // repeated legacy components whose relation graph retains cutters for
-      // sibling placements outside the current part.
-      const auto cutter_bounds = mesh_bounds(*cutter);
-      if (!cutter_bounds || !intersects(host_bounds, *cutter_bounds)) continue;
-      trim_regular_sweep_to_relevance(*cutter, host_bounds);
-      if (cutter->positions.empty() || cutter->indices.empty()) continue;
-      const double volume = mesh_volume(*cutter);
-      cutters.push_back({operation.target_id, std::move(*cutter), std::nullopt, volume});
+      const auto bounds = mesh_bounds(*operand);
+      if (!bounds) continue;
+      const double volume = mesh_volume(*operand);
+      // Tekla's persisted Boolean-part type is 1=add, 2=cut, 3=weld-prep in
+      // the public API. DB1 stores those operatives as part obj_type 38, 11,
+      // and 39 respectively. Additions belong to this host by relation and
+      // may form a chain beyond the raw host bounds, so retain all of them.
+      if (addition) {
+        boolean_bounds.minimum.x = std::min(boolean_bounds.minimum.x, bounds->minimum.x);
+        boolean_bounds.minimum.y = std::min(boolean_bounds.minimum.y, bounds->minimum.y);
+        boolean_bounds.minimum.z = std::min(boolean_bounds.minimum.z, bounds->minimum.z);
+        boolean_bounds.maximum.x = std::max(boolean_bounds.maximum.x, bounds->maximum.x);
+        boolean_bounds.maximum.y = std::max(boolean_bounds.maximum.y, bounds->maximum.y);
+        boolean_bounds.maximum.z = std::max(boolean_bounds.maximum.z, bounds->maximum.z);
+        additions.push_back({operation.target_id, std::move(*operand), std::nullopt, volume});
+      } else {
+        cutters.push_back({operation.target_id, std::move(*operand), std::nullopt, volume});
+      }
     }
+    // Subtractive and weld-preparation operands can only shrink the fused
+    // host. Prune stale sibling cutters against the complete host+add envelope.
+    cutters.erase(std::remove_if(cutters.begin(), cutters.end(),
+                                 [&](const BooleanOperand& cutter) {
+                                   const auto bounds = mesh_bounds(cutter.mesh);
+                                   return !bounds || !intersects(boolean_bounds, *bounds);
+                                 }),
+                  cutters.end());
+    for (auto& cutter : cutters) {
+      trim_regular_sweep_to_relevance(cutter.mesh, boolean_bounds);
+    }
+    cutters.erase(std::remove_if(cutters.begin(), cutters.end(),
+                                 [](const BooleanOperand& cutter) {
+                                   return cutter.mesh.positions.empty() ||
+                                          cutter.mesh.indices.empty();
+                                 }),
+                  cutters.end());
     if (cutters.size() > 1U) {
       const auto [minimum_volume, maximum_volume] =
           std::minmax_element(cutters.begin(), cutters.end(),
-                              [](const BooleanCutter& left, const BooleanCutter& right) {
+                              [](const BooleanOperand& left, const BooleanOperand& right) {
                                 return left.volume < right.volume;
                               });
       const double tolerance = std::max(1.0, maximum_volume->volume * 1.0e-8);
@@ -3912,10 +4086,30 @@ class GeometryReader final : public BatchReader {
     for (auto& cutter : cutters) {
       cutter.semantic_recipe = prism_recipe_from_mesh(cutter.object_id, cutter.mesh);
     }
-    std::stable_sort(cutters.begin(), cutters.end(),
-                     [](const BooleanCutter& left, const BooleanCutter& right) {
+    for (auto& addition : additions) {
+      addition.semantic_recipe = prism_recipe_from_mesh(addition.object_id, addition.mesh);
+    }
+    std::stable_sort(additions.begin(), additions.end(),
+                     [](const BooleanOperand& left, const BooleanOperand& right) {
                        return left.volume > right.volume;
                      });
+    std::stable_sort(cutters.begin(), cutters.end(),
+                     [](const BooleanOperand& left, const BooleanOperand& right) {
+                       return left.volume > right.volume;
+                     });
+    for (auto& addition : additions) {
+      auto child =
+          append_csg_node(addition.object_id, std::move(addition.mesh), graph, depth + 1U, request,
+                          std::move(addition.semantic_recipe), force_mesh_fallback);
+      if (!child) {
+        ++graph.partial_results;
+        add_diagnostic(child.error().code, object_id,
+                       "Boolean operative " + std::to_string(addition.object_id) +
+                           " was omitted: " + child.error().message);
+        continue;
+      }
+      request.nodes[node_index].union_nodes.push_back(child.value());
+    }
     for (auto& cutter : cutters) {
       auto child = append_csg_node(cutter.object_id, std::move(cutter.mesh), graph, depth + 1U,
                                    request, std::move(cutter.semantic_recipe), force_mesh_fallback);
@@ -4000,6 +4194,7 @@ class GeometryReader final : public BatchReader {
   }
 
   [[nodiscard]] Result<bool> evaluate_operations_csg(std::uint32_t object_id, MeshData& mesh,
+                                                     const DefinitionGeometryView& definition,
                                                      OperationGraphState& graph) {
     const auto found = operations_.find(object_id);
     if (found == operations_.end() || found->second.empty()) return Result<bool>::success(false);
@@ -4018,29 +4213,30 @@ class GeometryReader final : public BatchReader {
       }
       return Result<OcctRequest>::success(std::move(request));
     };
+    const GeometryEvaluationPlacement placement{
+        .origin = {definition.origin.x, definition.origin.y, definition.origin.z},
+        .x_axis = {definition.x_axis.x, definition.x_axis.y, definition.x_axis.z},
+        .y_axis = {definition.y_axis.x, definition.y_axis.y, definition.y_axis.z},
+        .z_axis = {definition.z_axis.x, definition.z_axis.y, definition.z_axis.z},
+    };
     const auto evaluate_request = [&](const OcctRequest& request) {
-      auto key = encode_translation_normalized_occt_request(request);
-      if (key) {
-        if (auto cached = cached_topology_result(key.value(), request.object_id)) {
-          return Result<OcctMesh>::success(std::move(*cached));
-        }
-      }
-      auto evaluated = topology_mode_ == TopologyMode::supervised
-                           ? supervised_host_ != nullptr
-                                 ? supervised_host_->evaluate(request)
-                                 : Result<OcctMesh>::failure(
-                                       {ErrorCode::invalid_argument,
-                                        "A supervised topology worker path was not supplied."})
-                           : direct_host_.evaluate(request);
-      if (evaluated && key) cache_topology_result(std::move(key.value()), evaluated.value());
-      return evaluated;
+      return geometry_evaluation_cache_.evaluate(
+          request, placement, [&](const OcctRequest& uncached) {
+            return topology_mode_ == TopologyMode::supervised
+                       ? supervised_host_ != nullptr
+                             ? supervised_host_->evaluate(uncached)
+                             : Result<OcctMesh>::failure(
+                                   {ErrorCode::invalid_argument,
+                                    "A supervised topology worker path was not supplied."})
+                       : direct_host_.evaluate(uncached);
+          });
     };
 
     auto request = build_request(graph, false);
     if (!request) return Result<bool>::failure(std::move(request.error()));
     const auto& root_node = request.value().nodes.front();
-    if (root_node.subtract.empty() && root_node.subtract_nodes.empty() &&
-        root_node.keep_half_spaces.empty()) {
+    if (root_node.subtract.empty() && root_node.union_nodes.empty() &&
+        root_node.subtract_nodes.empty() && root_node.keep_half_spaces.empty()) {
       return Result<bool>::success(false);
     }
     Result<OcctMesh> evaluated = evaluate_request(request.value());
@@ -4319,7 +4515,8 @@ class GeometryReader final : public BatchReader {
   }
 #endif
 
-  void apply_operations(std::uint32_t object_id, MeshData& mesh) {
+  void apply_operations(std::uint32_t object_id, MeshData& mesh,
+                        const DefinitionGeometryView& definition) {
     const auto found = operations_.find(object_id);
     if (found == operations_.end() || found->second.empty()) return;
     if (topology_mode_ == TopologyMode::disabled) {
@@ -4330,11 +4527,12 @@ class GeometryReader final : public BatchReader {
     }
 #if !defined(TEKLA_DB1_HAS_OCCT)
     (void)mesh;
+    (void)definition;
     diagnostics_.push_back({ErrorCode::decoder_unavailable, object_id,
                             "This build does not contain the optional topology evaluator."});
 #else
     OperationGraphState graph;
-    auto evaluated = evaluate_operations_csg(object_id, mesh, graph);
+    auto evaluated = evaluate_operations_csg(object_id, mesh, definition, graph);
     if (!evaluated) {
       add_diagnostic(evaluated.error().code, object_id, std::move(evaluated.error().message));
     }
@@ -4362,15 +4560,14 @@ class GeometryReader final : public BatchReader {
   bool emit_meshes_ = false;
   std::size_t batch_size_ = 0;
   TopologyMode topology_mode_ = TopologyMode::disabled;
+  MeshCoordinateMode mesh_coordinate_mode_ = MeshCoordinateMode::model_space;
   std::uint64_t object_id_min_ = 0;
   std::uint64_t object_id_max_ = std::numeric_limits<std::uint64_t>::max();
 #if defined(TEKLA_DB1_HAS_OCCT)
   std::unordered_map<OperativeCacheKey, OperativeCacheEntry, OperativeCacheKeyHash>
       operative_cache_;
   std::size_t operative_cache_bytes_ = 0U;
-  std::unordered_map<std::vector<std::byte>, TopologyResultCacheEntry, TopologyResultCacheKeyHash>
-      topology_result_cache_;
-  std::size_t topology_result_cache_bytes_ = 0U;
+  GeometryEvaluationCache geometry_evaluation_cache_;
   DirectOcctHost direct_host_;
   std::unique_ptr<SupervisedOcctHost> supervised_host_;
 #endif
@@ -4579,11 +4776,13 @@ Result<ProcessStream> make_geometry_stream(std::shared_ptr<const ModelStorage> s
         const auto tuple = record.subspan(1, relations->tuple_size);
         const auto operation_type = read_u32(tuple, type->offset);
         if (operation_type != 9U && operation_type != 11U && operation_type != 12U &&
-            operation_type != 79U)
+            operation_type != 38U && operation_type != 39U && operation_type != 79U)
           continue;
         const auto target_id = read_u32(tuple, target->offset);
         if (operation_type == 79U && !chamfer_map.contains(target_id)) continue;
-        if (operation_type == 11U) boolean_operatives.insert(target_id);
+        if (operation_type == 11U || operation_type == 38U || operation_type == 39U) {
+          boolean_operatives.insert(target_id);
+        }
         operations[read_u32(tuple, source->offset)].push_back(
             {operation_type, target_id, read_u32(tuple, relation_id->offset),
              read_u32(record, 1 + relations->tuple_size + 4U)});
@@ -4795,9 +4994,9 @@ Result<ProcessStream> make_geometry_stream(std::shared_ptr<const ModelStorage> s
           ? 256U
           : static_cast<std::size_t>(
                 std::clamp<std::uint64_t>(request.batch_memory_budget_bytes / 32768U, 1, 4096)),
-      request.topology_mode, std::string(request.topology_worker_path),
-      request.topology_timeout_milliseconds, request.geometry_object_id_min,
-      request.geometry_object_id_max));
+      request.topology_mode, request.mesh_coordinate_mode,
+      std::string(request.topology_worker_path), request.topology_timeout_milliseconds,
+      request.geometry_object_id_min, request.geometry_object_id_max));
 }
 
 }  // namespace tekla::db1::detail

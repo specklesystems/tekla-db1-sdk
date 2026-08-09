@@ -50,6 +50,21 @@ if(TARGET tekla_db1_gltf)
       -P ${CMAKE_CURRENT_SOURCE_DIR}/gltf_determinism.cmake)
 endif()
 
+if(TEKLA_DB1_ENABLE_OCCT)
+  add_executable(tekla_db1_geometry_evaluation_cache_test geometry_evaluation_cache_test.cpp)
+  target_include_directories(tekla_db1_geometry_evaluation_cache_test
+    PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_link_libraries(tekla_db1_geometry_evaluation_cache_test PRIVATE tekla_db1::core)
+  tekla_db1_set_project_warnings(tekla_db1_geometry_evaluation_cache_test)
+  tekla_db1_enable_sanitizers(tekla_db1_geometry_evaluation_cache_test)
+  add_test(NAME geometry_evaluation_cache_contract
+    COMMAND tekla_db1_geometry_evaluation_cache_test)
+  add_test(NAME geometry_evaluation_cache_profile_contract
+    COMMAND ${CMAKE_COMMAND}
+      -DCACHE_FIXTURE=$<TARGET_FILE:tekla_db1_geometry_evaluation_cache_test>
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/geometry_evaluation_cache_profile.cmake)
+endif()
+
 if(TEKLA_DB1_ENABLE_OCCT AND TARGET tekla-db1-occt-worker)
   target_compile_definitions(tekla_db1_identity_test PRIVATE
     TEKLA_DB1_TEST_HAS_OCCT=1)

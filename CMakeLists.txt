@@ -74,12 +74,14 @@ add_library(tekla_db1_core STATIC
   src/geometry.cpp
   src/identity.cpp
   src/mapped_file.cpp
+  src/mesh_placement.cpp
   src/model.cpp
   src/nonpart_geometry.cpp
   src/package.cpp
   src/profile.cpp
   src/role_schema.cpp
   src/semantic.cpp
+  src/weld_semantics.cpp
   src/schema_validation.cpp)
 target_sources(tekla_db1_core PRIVATE
   src/shape.cpp
@@ -111,6 +113,7 @@ if(TEKLA_DB1_ENABLE_OCCT)
   find_package(OpenCASCADE REQUIRED COMPONENTS
     FoundationClasses ModelingData ModelingAlgorithms)
   target_sources(tekla_db1_core PRIVATE
+    src/geometry_evaluation_cache.cpp
     src/occt/evaluator.cpp
     src/occt/protocol.cpp)
   if(UNIX)

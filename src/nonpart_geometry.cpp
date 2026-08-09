@@ -76,6 +76,28 @@ struct MeshData {
   std::vector<std::uint32_t> indices;
 };
 
+struct WeldDefinition {
+  std::uint32_t common_attribute_id = 0;
+  std::uint32_t above_attribute_id = 0;
+  std::uint32_t below_attribute_id = 0;
+};
+
+struct WeldCommonGeometry {
+  bool compound = false;
+  bool logical = false;
+};
+
+struct WeldSeamGeometry {
+  double size = 0.0;
+  std::uint32_t type = 0;
+};
+
+struct WeldPolygonRow {
+  std::uint32_t number = 0;
+  std::uint32_t type = 0;
+  std::vector<Vector3d> values;
+};
+
 struct DiagnosticData {
   ErrorCode code = ErrorCode::decoder_unavailable;
   std::uint64_t object_id = 0;
@@ -111,7 +133,7 @@ class RetainedGeometryBudget {
   [[nodiscard]] bool can_consume_curve_sets(
       std::span<const std::pair<std::size_t, std::size_t>> sets) const noexcept {
     std::size_t total = 0U;
-    for (const auto [curve_count, point_count] : sets) {
+    for (const auto& [curve_count, point_count] : sets) {
       const auto per_curve = curve_bytes(point_count);
       if (!per_curve) return false;
       const auto bytes = checked_product(curve_count, *per_curve);
@@ -128,14 +150,15 @@ class RetainedGeometryBudget {
     return bytes && consume(*bytes);
   }
 
-  [[nodiscard]] bool can_consume_mesh(std::size_t position_count,
-                                      std::size_t index_count) const noexcept {
-    const auto bytes = mesh_bytes(position_count, index_count);
+  [[nodiscard]] bool can_consume_mesh(std::size_t position_count, std::size_t index_count,
+                                      bool include_record = true) const noexcept {
+    const auto bytes = mesh_bytes(position_count, index_count, include_record);
     return bytes && *bytes <= remaining();
   }
 
-  [[nodiscard]] bool consume_mesh(std::size_t position_count, std::size_t index_count) noexcept {
-    const auto bytes = mesh_bytes(position_count, index_count);
+  [[nodiscard]] bool consume_mesh(std::size_t position_count, std::size_t index_count,
+                                  bool include_record = true) noexcept {
+    const auto bytes = mesh_bytes(position_count, index_count, include_record);
     return bytes && consume(*bytes);
   }
 
@@ -168,12 +191,15 @@ class RetainedGeometryBudget {
   }
 
   [[nodiscard]] static std::optional<std::size_t> mesh_bytes(std::size_t position_count,
-                                                             std::size_t index_count) noexcept {
+                                                             std::size_t index_count,
+                                                             bool include_record) noexcept {
     const auto positions = checked_product(position_count, sizeof(float));
     const auto indices = checked_product(index_count, sizeof(std::uint32_t));
     if (!positions || !indices) return std::nullopt;
     const auto arrays = checked_sum(*positions, *indices);
-    return arrays ? checked_sum(sizeof(MeshData), *arrays) : std::nullopt;
+    return !arrays          ? std::nullopt
+           : include_record ? checked_sum(sizeof(MeshData), *arrays)
+                            : arrays;
   }
 
   [[nodiscard]] std::size_t remaining() const noexcept { return limit_ - used_; }
@@ -225,6 +251,25 @@ struct PolygonChunk {
   std::vector<std::array<double, 2>> points;
 };
 
+struct SurfaceTreatmentAttribute {
+  double thickness = 0.0;
+  std::uint32_t type = 0U;
+};
+
+struct SurfaceTreatmentPosition {
+  std::uint32_t depth = 0U;
+  double depth_offset = 0.0;
+};
+
+struct SurfaceTreatmentRecord {
+  std::uint32_t object_id = 0U;
+  std::uint32_t attribute_id = 0U;
+  std::uint32_t positioning_id = 0U;
+  std::uint32_t first_point_id = 0U;
+  std::uint32_t second_point_id = 0U;
+  std::uint32_t polygon_id = 0U;
+};
+
 struct BoltAxisLimits {
   double start = 0.0;
   double end = 0.0;
@@ -268,10 +313,80 @@ struct BoltDisplayAttribute {
           lhs.x * rhs.y - lhs.y * rhs.x};
 }
 
+[[nodiscard]] double dot(Vector3d lhs, Vector3d rhs) noexcept {
+  return lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z;
+}
+
 [[nodiscard]] std::optional<Vector3d> normalized(Vector3d value) noexcept {
   const double magnitude = vector_length(value);
   if (!std::isfinite(magnitude) || magnitude <= 1.0e-12) return std::nullopt;
   return scale(value, 1.0 / magnitude);
+}
+
+[[nodiscard]] double signed_area(std::span<const std::array<double, 2>> points) noexcept {
+  double area = 0.0;
+  for (std::size_t index = 0U; index < points.size(); ++index) {
+    const auto& current = points[index];
+    const auto& next = points[(index + 1U) % points.size()];
+    area += current[0] * next[1] - next[0] * current[1];
+  }
+  return area / 2.0;
+}
+
+[[nodiscard]] bool point_in_triangle(const std::array<double, 2>& point,
+                                     const std::array<double, 2>& first,
+                                     const std::array<double, 2>& second,
+                                     const std::array<double, 2>& third) noexcept {
+  const auto side = [](const auto& point_value, const auto& start, const auto& end) {
+    return (end[0] - start[0]) * (point_value[1] - start[1]) -
+           (end[1] - start[1]) * (point_value[0] - start[0]);
+  };
+  constexpr double tolerance = 1.0e-10;
+  return side(point, first, second) >= -tolerance && side(point, second, third) >= -tolerance &&
+         side(point, third, first) >= -tolerance;
+}
+
+[[nodiscard]] std::optional<std::vector<std::array<std::uint32_t, 3>>> triangulate_polygon(
+    std::span<const std::array<double, 2>> points) {
+  if (points.size() < 3U || points.size() > std::numeric_limits<std::uint32_t>::max()) {
+    return std::nullopt;
+  }
+  std::vector<std::uint32_t> remaining(points.size());
+  for (std::size_t index = 0U; index < remaining.size(); ++index) {
+    remaining[index] = static_cast<std::uint32_t>(index);
+  }
+  if (signed_area(points) < 0.0) std::reverse(remaining.begin(), remaining.end());
+  std::vector<std::array<std::uint32_t, 3>> triangles;
+  triangles.reserve(points.size() - 2U);
+  while (remaining.size() > 3U) {
+    bool clipped = false;
+    for (std::size_t cursor = 0U; cursor < remaining.size(); ++cursor) {
+      const auto previous = remaining[(cursor + remaining.size() - 1U) % remaining.size()];
+      const auto current = remaining[cursor];
+      const auto next = remaining[(cursor + 1U) % remaining.size()];
+      const auto first_edge = std::array<double, 2>{points[current][0] - points[previous][0],
+                                                    points[current][1] - points[previous][1]};
+      const auto second_edge = std::array<double, 2>{points[next][0] - points[current][0],
+                                                     points[next][1] - points[current][1]};
+      if (first_edge[0] * second_edge[1] - first_edge[1] * second_edge[0] <= 1.0e-10) continue;
+      bool contains = false;
+      for (const auto candidate : remaining) {
+        if (candidate == previous || candidate == current || candidate == next) continue;
+        if (point_in_triangle(points[candidate], points[previous], points[current], points[next])) {
+          contains = true;
+          break;
+        }
+      }
+      if (contains) continue;
+      triangles.push_back({previous, current, next});
+      remaining.erase(remaining.begin() + static_cast<std::ptrdiff_t>(cursor));
+      clipped = true;
+      break;
+    }
+    if (!clipped) return std::nullopt;
+  }
+  triangles.push_back({remaining[0], remaining[1], remaining[2]});
+  return triangles;
 }
 
 [[nodiscard]] Vector3d transform(Vector3d local, const CoordinateSystem& system,
@@ -1118,13 +1233,368 @@ void append_cylinder(MeshData& mesh, Vector3d start, Vector3d end, double radius
   append_prism(mesh, start, end, *first, cross(*axis, *first), radius, facets);
 }
 
+class WeldPolygonValueCursor {
+ public:
+  explicit WeldPolygonValueCursor(std::span<const WeldPolygonRow> rows) : rows_(rows) {}
+
+  [[nodiscard]] std::optional<Vector3d> next() noexcept {
+    while (row_ < rows_.size() && value_ == rows_[row_].values.size()) {
+      ++row_;
+      value_ = 0U;
+    }
+    if (row_ == rows_.size()) return std::nullopt;
+    return rows_[row_].values[value_++];
+  }
+
+ private:
+  std::span<const WeldPolygonRow> rows_;
+  std::size_t row_ = 0U;
+  std::size_t value_ = 0U;
+};
+
+struct WeldFilletSweepPlan {
+  std::size_t segment_count = 0U;
+  std::size_t position_growth = 0U;
+  std::size_t index_growth = 0U;
+  std::uint32_t first_vertex = 0U;
+};
+
+struct WeldFilletFrame {
+  Vector3d first;
+  Vector3d second;
+};
+
+// Returns the first vertex index for an indexed-mesh append when both position
+// arrays are complete XYZ triples and the aggregate remains uint32-addressable.
+[[nodiscard]] constexpr std::optional<std::uint32_t> checked_indexed_mesh_append_base(
+    std::size_t existing_position_count, std::size_t appended_position_count) noexcept {
+  if (existing_position_count % 3U != 0U || appended_position_count % 3U != 0U) {
+    return std::nullopt;
+  }
+  const auto existing_vertices = existing_position_count / 3U;
+  const auto appended_vertices = appended_position_count / 3U;
+  constexpr auto maximum = std::numeric_limits<std::uint32_t>::max();
+  if (existing_vertices > maximum || appended_vertices > maximum - existing_vertices) {
+    return std::nullopt;
+  }
+  return static_cast<std::uint32_t>(existing_vertices);
+}
+
+constexpr auto kMaximumIndexedVertex = std::numeric_limits<std::uint32_t>::max();
+static_assert(checked_indexed_mesh_append_base(12U, 9U) == 4U);
+static_assert(
+    checked_indexed_mesh_append_base(static_cast<std::size_t>(kMaximumIndexedVertex - 1U) * 3U,
+                                     3U) == kMaximumIndexedVertex - 1U);
+static_assert(!checked_indexed_mesh_append_base(
+    static_cast<std::size_t>(kMaximumIndexedVertex - 1U) * 3U, 9U));
+static_assert(!checked_indexed_mesh_append_base(4U, 3U));
+
+[[nodiscard]] std::optional<WeldFilletFrame> weld_fillet_frame(Vector3d first_value,
+                                                               Vector3d second_value,
+                                                               Vector3d start,
+                                                               Vector3d end) noexcept {
+  const auto tangent = normalized(subtract(end, start));
+  if (!tangent) return std::nullopt;
+  const auto project_leg = [&](Vector3d value) -> std::optional<Vector3d> {
+    // Persisted directions may carry small tangent noise, but a leg must still have at least a
+    // one-microradian angular separation from the path. This is above float-direction resolution
+    // while preserving the observed near-perpendicular frames after projection.
+    constexpr double minimum_sine_to_tangent = 1.0e-6;
+    const double source_length = vector_length(value);
+    if (!std::isfinite(source_length) || source_length <= 1.0e-12) return std::nullopt;
+    const auto projected = subtract(value, scale(*tangent, dot(value, *tangent)));
+    const double projected_length = vector_length(projected);
+    if (!std::isfinite(projected_length) ||
+        projected_length <= source_length * minimum_sine_to_tangent) {
+      return std::nullopt;
+    }
+    return scale(projected, 1.0 / projected_length);
+  };
+  auto first = project_leg(first_value);
+  auto second = project_leg(second_value);
+  if (!first || !second || std::abs(vector_length(cross(*first, *second)) - 1.0) > 1.0e-6) {
+    return std::nullopt;
+  }
+  if (dot(cross(*first, *second), *tangent) < 0.0) std::swap(first, second);
+  return WeldFilletFrame{*first, *second};
+}
+
+[[nodiscard]] std::optional<std::array<Vector3d, 3>> model_weld_ring(
+    Vector3d origin, const WeldFilletFrame& frame, double size, const CoordinateSystem& system,
+    const Axes& system_axes) noexcept {
+  const std::array<Vector3d, 3> ring{
+      origin,
+      add(origin, scale(frame.first, size)),
+      add(origin, scale(frame.second, size)),
+  };
+  std::array<Vector3d, 3> model_ring;
+  for (std::size_t index = 0U; index < ring.size(); ++index) {
+    const auto local = ring[index];
+    const auto model = transform(local, system, system_axes);
+    if (!std::isfinite(model.x) || !std::isfinite(model.y) || !std::isfinite(model.z) ||
+        std::abs(model.x) > std::numeric_limits<float>::max() ||
+        std::abs(model.y) > std::numeric_limits<float>::max() ||
+        std::abs(model.z) > std::numeric_limits<float>::max()) {
+      return std::nullopt;
+    }
+    // MeshData stores model positions as floats, so topology must be validated after the same
+    // quantization. Large model origins can otherwise collapse valid double-space features.
+    model_ring[index] = {
+        static_cast<double>(static_cast<float>(model.x)),
+        static_cast<double>(static_cast<float>(model.y)),
+        static_cast<double>(static_cast<float>(model.z)),
+    };
+  }
+  return model_ring;
+}
+
+[[nodiscard]] bool valid_model_triangle(Vector3d first, Vector3d second, Vector3d third) noexcept {
+  const auto first_edge = subtract(second, first);
+  const auto second_edge = subtract(third, first);
+  const double first_length = vector_length(first_edge);
+  const double second_length = vector_length(second_edge);
+  if (!std::isfinite(first_length) || !std::isfinite(second_length) || first_length <= 1.0e-12 ||
+      second_length <= 1.0e-12) {
+    return false;
+  }
+  const double doubled_area = vector_length(cross(first_edge, second_edge));
+  return std::isfinite(doubled_area) && doubled_area > first_length * second_length * 1.0e-9;
+}
+
+[[nodiscard]] bool valid_model_ring(const std::array<Vector3d, 3>& ring) noexcept {
+  return valid_model_triangle(ring[0], ring[1], ring[2]);
+}
+
+[[nodiscard]] bool valid_weld_sides(const std::array<Vector3d, 3>& first_ring,
+                                    const std::array<Vector3d, 3>& second_ring) noexcept {
+  for (std::size_t side = 0U; side < first_ring.size(); ++side) {
+    const auto adjacent = (side + 1U) % first_ring.size();
+    if (!valid_model_triangle(first_ring[side], first_ring[adjacent], second_ring[adjacent]) ||
+        !valid_model_triangle(first_ring[side], second_ring[adjacent], second_ring[side])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] std::optional<WeldFilletSweepPlan> plan_weld_fillet_sweep(
+    const MeshData& mesh, std::span<const WeldPolygonRow> rows, double size,
+    const CoordinateSystem& system, const Axes& system_axes) {
+  if (!std::isfinite(size) || size <= 0.0) return std::nullopt;
+  std::size_t value_count = 0U;
+  for (const auto& row : rows) {
+    if (row.values.size() > std::numeric_limits<std::size_t>::max() - value_count) {
+      return std::nullopt;
+    }
+    value_count += row.values.size();
+  }
+  if (value_count < 4U || (value_count - 1U) % 3U != 0U) return std::nullopt;
+  const auto segment_count = (value_count - 1U) / 3U;
+  if (segment_count == 0U || segment_count > (std::numeric_limits<std::size_t>::max() / 9U) - 1U ||
+      segment_count > (std::numeric_limits<std::size_t>::max() - 6U) / 18U) {
+    return std::nullopt;
+  }
+  const auto position_growth = (segment_count + 1U) * 9U;
+  const auto index_growth = segment_count * 18U + 6U;
+  if (position_growth > mesh.positions.max_size() - mesh.positions.size() ||
+      index_growth > mesh.indices.max_size() - mesh.indices.size()) {
+    return std::nullopt;
+  }
+  const auto first_vertex =
+      checked_indexed_mesh_append_base(mesh.positions.size(), position_growth);
+  if (!first_vertex) return std::nullopt;
+
+  WeldPolygonValueCursor cursor(rows);
+  auto origin = cursor.next();
+  if (!origin) return std::nullopt;
+  std::optional<std::array<Vector3d, 3>> previous_ring;
+  for (std::size_t segment = 0U; segment < segment_count; ++segment) {
+    const auto first = cursor.next();
+    const auto second = cursor.next();
+    const auto end = cursor.next();
+    if (!first || !second || !end) return std::nullopt;
+    const auto frame = weld_fillet_frame(*first, *second, *origin, *end);
+    if (!frame) return std::nullopt;
+    const auto current_ring = model_weld_ring(*origin, *frame, size, system, system_axes);
+    if (!current_ring || !valid_model_ring(*current_ring) ||
+        (previous_ring && !valid_weld_sides(*previous_ring, *current_ring))) {
+      return std::nullopt;
+    }
+    previous_ring = current_ring;
+    if (segment + 1U == segment_count) {
+      const auto end_ring = model_weld_ring(*end, *frame, size, system, system_axes);
+      if (!end_ring || !valid_model_ring(*end_ring) ||
+          !valid_weld_sides(*current_ring, *end_ring)) {
+        return std::nullopt;
+      }
+    }
+    origin = end;
+  }
+  if (cursor.next()) return std::nullopt;
+  return WeldFilletSweepPlan{segment_count, position_growth, index_growth, *first_vertex};
+}
+
+void append_weld_ring(MeshData& mesh, Vector3d origin, const WeldFilletFrame& frame, double size,
+                      const CoordinateSystem& system, const Axes& system_axes) {
+  const std::array<Vector3d, 3> ring{
+      origin,
+      add(origin, scale(frame.first, size)),
+      add(origin, scale(frame.second, size)),
+  };
+  for (const auto local : ring) {
+    const auto model = transform(local, system, system_axes);
+    mesh.positions.insert(
+        mesh.positions.end(),
+        {static_cast<float>(model.x), static_cast<float>(model.y), static_cast<float>(model.z)});
+  }
+}
+
+void append_weld_fillet_sweep(MeshData& mesh, std::span<const WeldPolygonRow> rows, double size,
+                              const CoordinateSystem& system, const Axes& system_axes,
+                              const WeldFilletSweepPlan& plan) {
+  mesh.positions.reserve(mesh.positions.size() + plan.position_growth);
+  mesh.indices.reserve(mesh.indices.size() + plan.index_growth);
+
+  WeldPolygonValueCursor cursor(rows);
+  auto origin = *cursor.next();
+  for (std::size_t segment = 0U; segment < plan.segment_count; ++segment) {
+    const auto first = *cursor.next();
+    const auto second = *cursor.next();
+    const auto end = *cursor.next();
+    const auto frame = *weld_fillet_frame(first, second, origin, end);
+    append_weld_ring(mesh, origin, frame, size, system, system_axes);
+    if (segment + 1U == plan.segment_count) {
+      append_weld_ring(mesh, end, frame, size, system, system_axes);
+    }
+    origin = end;
+  }
+  for (std::size_t segment = 0U; segment < plan.segment_count; ++segment) {
+    const auto current = plan.first_vertex + static_cast<std::uint32_t>(segment * 3U);
+    const auto next = current + 3U;
+    for (std::uint32_t side = 0U; side < 3U; ++side) {
+      const auto adjacent = (side + 1U) % 3U;
+      mesh.indices.insert(mesh.indices.end(), {current + side, current + adjacent, next + adjacent,
+                                               current + side, next + adjacent, next + side});
+    }
+  }
+  const auto last = plan.first_vertex + static_cast<std::uint32_t>(plan.segment_count * 3U);
+  mesh.indices.insert(mesh.indices.end(), {plan.first_vertex, plan.first_vertex + 2U,
+                                           plan.first_vertex + 1U, last, last + 1U, last + 2U});
+}
+
+[[nodiscard]] std::optional<MeshData> make_surface_treatment_mesh(
+    const SurfaceTreatmentRecord& surface, const SurfaceTreatmentAttribute& attribute,
+    const SurfaceTreatmentPosition& positioning, std::span<const std::array<double, 2>> polygon,
+    Vector3d first_point, Vector3d second_point, const CoordinateSystem& father_system,
+    const Axes& father_axes, MeshCoordinateMode coordinate_mode,
+    std::optional<RigidPlacementView>& placement) {
+  if (attribute.type != 3U || !std::isfinite(attribute.thickness) || attribute.thickness <= 0.0 ||
+      polygon.size() < 3U || positioning.depth > 2U || !std::isfinite(positioning.depth_offset)) {
+    return std::nullopt;
+  }
+  std::vector<std::array<double, 2>> contour(polygon.begin(), polygon.end());
+  if (contour.size() > 3U && contour.front() == contour.back()) contour.pop_back();
+  const auto cap = triangulate_polygon(contour);
+  const auto father_x = normalized(father_axes.x);
+  const auto father_y = normalized(father_axes.y);
+  if (!cap || !father_x || !father_y) return std::nullopt;
+  const auto father_normal = normalized(cross(*father_x, *father_y));
+  const auto x_axis = normalized(subtract(second_point, first_point));
+  if (!father_normal || !x_axis || std::abs(dot(*father_normal, *x_axis)) > 1.0e-6) {
+    return std::nullopt;
+  }
+  const double face_side = dot(subtract(first_point, father_system.origin), *father_normal);
+  if (!std::isfinite(face_side) || std::abs(face_side) <= 1.0e-7) return std::nullopt;
+  const auto normal = scale(*father_normal, face_side > 0.0 ? 1.0 : -1.0);
+  const auto y_axis = normalized(cross(normal, *x_axis));
+  if (!y_axis) return std::nullopt;
+
+  double first_depth = positioning.depth_offset;
+  double second_depth = positioning.depth_offset;
+  if (positioning.depth == 0U) {
+    first_depth -= attribute.thickness / 2.0;
+    second_depth += attribute.thickness / 2.0;
+  } else if (positioning.depth == 1U) {
+    second_depth += attribute.thickness;
+  } else {
+    second_depth -= attribute.thickness;
+  }
+  const auto world_point = [&](const std::array<double, 2>& point, double depth) {
+    return add(first_point,
+               add(scale(*x_axis, point[0]), add(scale(*y_axis, point[1]), scale(normal, depth))));
+  };
+  MeshData mesh{.object_id = surface.object_id};
+  if (coordinate_mode == MeshCoordinateMode::local_with_rigid_placement) {
+    placement = RigidPlacementView{
+        .origin = first_point, .x_axis = *x_axis, .y_axis = *y_axis, .z_axis = normal};
+  }
+  mesh.positions.reserve(contour.size() * 6U);
+  for (const auto depth : std::array<double, 2>{first_depth, second_depth}) {
+    for (const auto& point : contour) {
+      const auto output = coordinate_mode == MeshCoordinateMode::local_with_rigid_placement
+                              ? Vector3d{point[0], point[1], depth}
+                              : world_point(point, depth);
+      if (!std::isfinite(output.x) || !std::isfinite(output.y) || !std::isfinite(output.z) ||
+          std::abs(output.x) > std::numeric_limits<float>::max() ||
+          std::abs(output.y) > std::numeric_limits<float>::max() ||
+          std::abs(output.z) > std::numeric_limits<float>::max()) {
+        return std::nullopt;
+      }
+      mesh.positions.insert(mesh.positions.end(),
+                            {static_cast<float>(output.x), static_cast<float>(output.y),
+                             static_cast<float>(output.z)});
+    }
+  }
+  const auto count = static_cast<std::uint32_t>(contour.size());
+  mesh.indices.reserve(cap->size() * 6U + contour.size() * 6U);
+  const bool first_is_outward = first_depth > second_depth;
+  for (const auto triangle : *cap) {
+    if (first_is_outward) {
+      mesh.indices.insert(mesh.indices.end(), triangle.begin(), triangle.end());
+      mesh.indices.insert(mesh.indices.end(),
+                          {count + triangle[0], count + triangle[2], count + triangle[1]});
+    } else {
+      mesh.indices.insert(mesh.indices.end(), {triangle[0], triangle[2], triangle[1]});
+      mesh.indices.insert(mesh.indices.end(),
+                          {count + triangle[0], count + triangle[1], count + triangle[2]});
+    }
+  }
+  for (std::uint32_t index = 0U; index < count; ++index) {
+    const auto next = (index + 1U) % count;
+    if (first_is_outward) {
+      mesh.indices.insert(mesh.indices.end(),
+                          {index, count + next, next, index, count + index, count + next});
+    } else {
+      mesh.indices.insert(mesh.indices.end(),
+                          {index, next, count + next, index, count + next, count + index});
+    }
+  }
+  for (std::size_t index = 0U; index < mesh.indices.size(); index += 3U) {
+    const auto point = [&](std::uint32_t vertex) {
+      const auto offset = static_cast<std::size_t>(vertex) * 3U;
+      return Vector3d{mesh.positions[offset], mesh.positions[offset + 1U],
+                      mesh.positions[offset + 2U]};
+    };
+    const auto first = point(mesh.indices[index]);
+    const auto second = point(mesh.indices[index + 1U]);
+    const auto third = point(mesh.indices[index + 2U]);
+    if (vector_length(cross(subtract(second, first), subtract(third, first))) <= 1.0e-8) {
+      return std::nullopt;
+    }
+  }
+  return mesh;
+}
+
 class NonPartReader final : public BatchReader {
  public:
   NonPartReader(std::vector<CurveData> curves, std::vector<MeshData> meshes,
-                std::vector<DiagnosticData> diagnostics, std::size_t batch_size)
+                std::vector<DiagnosticData> diagnostics,
+                std::unordered_map<std::uint64_t, RigidPlacementView> mesh_placements,
+                std::size_t batch_size)
       : curve_data_(std::move(curves)),
         mesh_data_(std::move(meshes)),
         diagnostic_data_(std::move(diagnostics)),
+        mesh_placements_(std::move(mesh_placements)),
         batch_size_(batch_size) {}
 
   Result<BatchView> next() override {
@@ -1146,7 +1616,16 @@ class NonPartReader final : public BatchReader {
       meshes_.reserve(count);
       for (std::size_t index = 0; index < count; ++index) {
         const auto& mesh = mesh_data_[mesh_index_ + index];
-        meshes_.push_back({mesh.object_id, mesh.positions, mesh.indices});
+        const auto placement = mesh_placements_.find(mesh.object_id);
+        meshes_.push_back(
+            MeshView{.object_id = mesh.object_id,
+                     .positions = mesh.positions,
+                     .indices = mesh.indices,
+                     .coordinate_space = placement == mesh_placements_.end()
+                                             ? MeshCoordinateMode::model_space
+                                             : MeshCoordinateMode::local_with_rigid_placement,
+                     .placement = placement == mesh_placements_.end() ? RigidPlacementView{}
+                                                                      : placement->second});
       }
       mesh_index_ += count;
       return Result<BatchView>::success(BatchView{.kind = BatchKind::meshes, .meshes = meshes_});
@@ -1169,6 +1648,7 @@ class NonPartReader final : public BatchReader {
   std::vector<CurveData> curve_data_;
   std::vector<MeshData> mesh_data_;
   std::vector<DiagnosticData> diagnostic_data_;
+  std::unordered_map<std::uint64_t, RigidPlacementView> mesh_placements_;
   std::vector<CurveView> curves_;
   std::vector<MeshView> meshes_;
   std::vector<Diagnostic> diagnostics_;
@@ -1345,6 +1825,7 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
   std::vector<CurveData> curves;
   std::vector<MeshData> meshes;
   std::vector<DiagnosticData> diagnostics;
+  std::unordered_map<std::uint64_t, RigidPlacementView> mesh_placements;
   const auto batch_size = request.batch_memory_budget_bytes == 0U
                               ? 256U
                               : static_cast<std::size_t>(std::clamp<std::uint64_t>(
@@ -1360,7 +1841,8 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
                              "populated legacy non-part tables remain unsupported."});
     }
     return Result<ProcessStream>::success(std::make_unique<NonPartReader>(
-        std::move(curves), std::move(meshes), std::move(diagnostics), batch_size));
+        std::move(curves), std::move(meshes), std::move(diagnostics), std::move(mesh_placements),
+        batch_size));
   }
   const bool legacy_objects = objects->name == "old_object_948";
   const auto* object_id = find_field(schema, *objects, "id");
@@ -1465,6 +1947,496 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
                              {scalar(tuple, *x), scalar(tuple, *y), scalar(tuple, *z)},
                              length == nullptr ? 0.0 : scalar(tuple, *length)});
       }
+    }
+  }
+  // Part frames are persisted on the part row itself, while rebar/weld frames
+  // use the separate coordsys table. Keep one lookup so hosted non-part
+  // geometry can resolve either storage convention.
+  if (const auto* parts = schema.find_table("part")) {
+    const auto* id = find_field(schema, *parts, "id");
+    const auto* axes_id = find_field(schema, *parts, "csys_attr_id");
+    const auto* x = find_field(schema, *parts, "csys_x");
+    const auto* y = find_field(schema, *parts, "csys_y");
+    const auto* z = find_field(schema, *parts, "csys_z");
+    const auto* length = find_field(schema, *parts, "csys_length");
+    if (id != nullptr && axes_id != nullptr && x != nullptr && y != nullptr && z != nullptr) {
+      const auto& layout = storage->layout.tables[parts->ordinal];
+      for (std::uint64_t row = 0U; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(storage->payload.bytes(), row);
+        if (hidden(record)) continue;
+        const auto tuple = record.subspan(1U, parts->tuple_size);
+        systems.try_emplace(
+            read_u32(tuple, id->offset),
+            CoordinateSystem{read_u32(tuple, axes_id->offset),
+                             {scalar(tuple, *x), scalar(tuple, *y), scalar(tuple, *z)},
+                             length == nullptr ? 0.0 : scalar(tuple, *length)});
+      }
+    }
+  }
+
+  // Legacy surface treatments are independently persisted model elements.
+  // Their contour is a local 2D partpolygon, p1->p2 is its local X axis, and
+  // relation type 73 identifies the father part whose frame supplies the
+  // supporting-face normal. The currently proven solid family is the numeric
+  // thickness TILE_SURFACE (type 3); other product-finish recipes fail open.
+  std::unordered_map<std::uint32_t, SurfaceTreatmentAttribute> surface_attributes;
+  if (const auto* table =
+          populated_table(*storage, schema, std::array<std::string_view, 1>{"surfacing_attr"})) {
+    const auto* id = find_field(schema, *table, "id");
+    const auto* geometry = find_field(schema, *table, "Geometry");
+    const auto* type = find_field(schema, *table, "surfacing_type");
+    if (id != nullptr && geometry != nullptr && type != nullptr) {
+      const auto& layout = storage->layout.tables[table->ordinal];
+      surface_attributes.reserve(static_cast<std::size_t>(layout.info.row_count));
+      for (std::uint64_t row = 0U; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(storage->payload.bytes(), row);
+        if (hidden(record)) continue;
+        const auto tuple = record.subspan(1U, table->tuple_size);
+        const auto thickness = positive_number(read_text(tuple, geometry->offset, geometry->size));
+        surface_attributes.insert_or_assign(
+            read_u32(tuple, id->offset),
+            SurfaceTreatmentAttribute{.thickness = thickness.value_or(0.0),
+                                      .type = read_u32(tuple, type->offset)});
+      }
+    }
+  }
+  std::vector<SurfaceTreatmentRecord> surface_records;
+  std::unordered_set<std::uint32_t> surface_point_ids;
+  std::unordered_set<std::uint32_t> surface_polygon_ids;
+  std::unordered_set<std::uint32_t> surface_positioning_ids;
+  if (const auto* table =
+          populated_table(*storage, schema, std::array<std::string_view, 1>{"surfacing"})) {
+    const auto* id = find_field(schema, *table, "id");
+    const auto* attribute = find_field(schema, *table, "attr_id");
+    const auto* positioning = find_field(schema, *table, "PositioningAttrId");
+    const auto* first = find_field(schema, *table, "p1");
+    const auto* second = find_field(schema, *table, "p2");
+    const auto* polygon = find_field(schema, *table, "polygon_id");
+    if (id != nullptr && attribute != nullptr && positioning != nullptr && first != nullptr &&
+        second != nullptr && polygon != nullptr) {
+      const auto& layout = storage->layout.tables[table->ordinal];
+      surface_records.reserve(static_cast<std::size_t>(layout.info.row_count));
+      for (std::uint64_t row = 0U; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(storage->payload.bytes(), row);
+        if (hidden(record)) continue;
+        const auto tuple = record.subspan(1U, table->tuple_size);
+        SurfaceTreatmentRecord surface{
+            .object_id = read_u32(tuple, id->offset),
+            .attribute_id = read_u32(tuple, attribute->offset),
+            .positioning_id = read_u32(tuple, positioning->offset),
+            .first_point_id = read_u32(tuple, first->offset),
+            .second_point_id = read_u32(tuple, second->offset),
+            .polygon_id = read_u32(tuple, polygon->offset),
+        };
+        if (surface.object_id < request.geometry_object_id_min ||
+            surface.object_id > request.geometry_object_id_max)
+          continue;
+        const auto object = object_types.find(surface.object_id);
+        if (object == object_types.end() || object->second.type != 73U ||
+            object->second.subtype != 3U)
+          continue;
+        surface_point_ids.insert(surface.first_point_id);
+        surface_point_ids.insert(surface.second_point_id);
+        surface_polygon_ids.insert(surface.polygon_id);
+        surface_positioning_ids.insert(surface.positioning_id);
+        surface_records.push_back(surface);
+      }
+    }
+  }
+  std::unordered_map<std::uint32_t, Vector3d> surface_points;
+  if (!surface_records.empty()) {
+    if (const auto* table = schema.find_table("point")) {
+      const auto* id = find_field(schema, *table, "id");
+      const auto* x = find_field(schema, *table, "x");
+      const auto* y = find_field(schema, *table, "y");
+      const auto* z = find_field(schema, *table, "z");
+      if (id != nullptr && x != nullptr && y != nullptr && z != nullptr) {
+        const auto& layout = storage->layout.tables[table->ordinal];
+        surface_points.reserve(surface_point_ids.size());
+        for (std::uint64_t row = 0U; row < layout.info.row_count; ++row) {
+          const auto record = layout.record(storage->payload.bytes(), row);
+          if (hidden(record)) continue;
+          const auto tuple = record.subspan(1U, table->tuple_size);
+          const auto key = read_u32(tuple, id->offset);
+          if (!surface_point_ids.contains(key)) continue;
+          surface_points.insert_or_assign(
+              key, Vector3d{scalar(tuple, *x), scalar(tuple, *y), scalar(tuple, *z)});
+        }
+      }
+    }
+  }
+  std::unordered_map<std::uint32_t, SurfaceTreatmentPosition> surface_positions;
+  if (!surface_records.empty()) {
+    if (const auto* table = schema.find_table("positioning")) {
+      const auto* id = find_field(schema, *table, "id");
+      const auto* depth = find_field(schema, *table, "PositionAtDepth");
+      const auto* offset = find_field(schema, *table, "PositionAtDepthOffset");
+      if (id != nullptr && depth != nullptr && offset != nullptr) {
+        const auto& layout = storage->layout.tables[table->ordinal];
+        surface_positions.reserve(surface_positioning_ids.size());
+        for (std::uint64_t row = 0U; row < layout.info.row_count; ++row) {
+          const auto record = layout.record(storage->payload.bytes(), row);
+          if (hidden(record)) continue;
+          const auto tuple = record.subspan(1U, table->tuple_size);
+          const auto key = read_u32(tuple, id->offset);
+          if (!surface_positioning_ids.contains(key)) continue;
+          surface_positions.insert_or_assign(
+              key, SurfaceTreatmentPosition{.depth = read_u32(tuple, depth->offset),
+                                            .depth_offset = scalar(tuple, *offset)});
+        }
+      }
+    }
+  }
+  std::unordered_map<std::uint32_t, std::uint32_t> surface_fathers;
+  if (!surface_records.empty()) {
+    if (const auto* table = schema.find_table("relation")) {
+      const auto* type = find_field(schema, *table, "type");
+      const auto* source = find_field(schema, *table, "id1");
+      const auto* target = find_field(schema, *table, "id2");
+      if (type != nullptr && source != nullptr && target != nullptr) {
+        const auto& layout = storage->layout.tables[table->ordinal];
+        for (std::uint64_t row = 0U; row < layout.info.row_count; ++row) {
+          const auto record = layout.record(storage->payload.bytes(), row);
+          if (hidden(record)) continue;
+          const auto tuple = record.subspan(1U, table->tuple_size);
+          if (read_u32(tuple, type->offset) != 73U) continue;
+          surface_fathers.insert_or_assign(read_u32(tuple, target->offset),
+                                           read_u32(tuple, source->offset));
+        }
+      }
+    }
+  }
+  std::unordered_map<std::uint32_t, std::vector<PolygonChunk>> surface_polygon_chunks;
+  std::unordered_set<std::uint32_t> limited_surface_polygons;
+  if (!surface_records.empty()) {
+    if (const auto* table = populated_table(
+            *storage, schema,
+            std::array<std::string_view, 2>{"partpolygon", "old_partpolygon_898"})) {
+      const auto* id = find_field(schema, *table, "id");
+      const auto* number = find_field(schema, *table, "no");
+      if (id != nullptr) {
+        const auto& layout = storage->layout.tables[table->ordinal];
+        for (std::uint64_t row = 0U; row < layout.info.row_count; ++row) {
+          const auto record = layout.record(storage->payload.bytes(), row);
+          if (hidden(record)) continue;
+          const auto tuple = record.subspan(1U, table->tuple_size);
+          const auto key = read_u32(tuple, id->offset);
+          if (!surface_polygon_ids.contains(key)) continue;
+          PolygonChunk chunk{.number = number == nullptr ? 0U : read_u32(tuple, number->offset)};
+          for (std::size_t index = 1U; index <= 10U; ++index) {
+            const auto suffix = std::to_string(index);
+            const auto* x = find_field(schema, *table, "x" + suffix);
+            const auto* y = find_field(schema, *table, "y" + suffix);
+            const auto* type = find_field(schema, *table, "types" + suffix);
+            if (x == nullptr || y == nullptr || type == nullptr ||
+                read_u32(tuple, type->offset) == 2'147'483'647U)
+              break;
+            chunk.points.push_back({scalar(tuple, *x), scalar(tuple, *y)});
+          }
+          const auto bytes = sizeof(PolygonChunk) + chunk.points.size() * sizeof(chunk.points[0]);
+          if (!geometry_budget.consume_decode_bytes(bytes)) {
+            limited_surface_polygons.insert(key);
+            continue;
+          }
+          if (!chunk.points.empty()) surface_polygon_chunks[key].push_back(std::move(chunk));
+        }
+      }
+    }
+  }
+  for (auto& [key, chunks] : surface_polygon_chunks) {
+    (void)key;
+    std::sort(chunks.begin(), chunks.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.number < rhs.number; });
+  }
+  for (const auto& surface : surface_records) {
+    if (limited_surface_polygons.contains(surface.polygon_id)) {
+      diagnostics.push_back({ErrorCode::resource_limit, surface.object_id,
+                             "Surface-treatment polygon exceeds the aggregate geometry budget."});
+      continue;
+    }
+    const auto attribute = surface_attributes.find(surface.attribute_id);
+    const auto positioning = surface_positions.find(surface.positioning_id);
+    const auto first = surface_points.find(surface.first_point_id);
+    const auto second = surface_points.find(surface.second_point_id);
+    const auto father = surface_fathers.find(surface.object_id);
+    const auto chunks = surface_polygon_chunks.find(surface.polygon_id);
+    if (attribute == surface_attributes.end() || positioning == surface_positions.end() ||
+        first == surface_points.end() || second == surface_points.end() ||
+        father == surface_fathers.end() || chunks == surface_polygon_chunks.end() ||
+        !systems.contains(father->second)) {
+      diagnostics.push_back({ErrorCode::decoder_unavailable, surface.object_id,
+                             "Surface-treatment contour, father, or placement is unavailable."});
+      continue;
+    }
+    const auto father_system = systems.find(father->second);
+    const auto father_axes = axes.find(father_system->second.axes_id);
+    if (father_axes == axes.end()) {
+      diagnostics.push_back({ErrorCode::decoder_unavailable, surface.object_id,
+                             "Surface-treatment father coordinate frame is unavailable."});
+      continue;
+    }
+    std::vector<std::array<double, 2>> contour;
+    for (const auto& chunk : chunks->second) {
+      contour.insert(contour.end(), chunk.points.begin(), chunk.points.end());
+    }
+    if (contour.size() < 3U) {
+      diagnostics.push_back({ErrorCode::invalid_geometry, surface.object_id,
+                             "Persisted surface-treatment contour has fewer than three points."});
+      continue;
+    }
+    if (contour.size() > std::numeric_limits<std::size_t>::max() / 12U) {
+      diagnostics.push_back({ErrorCode::resource_limit, surface.object_id,
+                             "Surface-treatment mesh size is not representable."});
+      continue;
+    }
+    const auto position_count = contour.size() * 6U;
+    const auto index_count = contour.size() * 12U - 12U;
+    if (!geometry_budget.can_consume_mesh(position_count, index_count)) {
+      diagnostics.push_back({ErrorCode::resource_limit, surface.object_id,
+                             "Surface-treatment mesh exceeds the aggregate geometry budget."});
+      continue;
+    }
+    std::optional<RigidPlacementView> placement;
+    auto mesh = make_surface_treatment_mesh(
+        surface, attribute->second, positioning->second, contour, first->second, second->second,
+        father_system->second, father_axes->second, request.mesh_coordinate_mode, placement);
+    if (!mesh) {
+      diagnostics.push_back({ErrorCode::invalid_geometry, surface.object_id,
+                             "Persisted surface-treatment recipe is unsupported or invalid."});
+      continue;
+    }
+    if (!geometry_budget.consume_mesh(mesh->positions.size(), mesh->indices.size())) {
+      diagnostics.push_back({ErrorCode::resource_limit, surface.object_id,
+                             "Surface-treatment mesh exceeds the aggregate geometry budget."});
+      continue;
+    }
+    if (placement) mesh_placements.insert_or_assign(surface.object_id, *placement);
+    meshes.push_back(std::move(*mesh));
+  }
+
+  // Modern polygon welds persist a local fillet path as repeating
+  // [position, first-leg direction, second-leg direction] values followed by
+  // the final position. Relation 40001 owns each polygon group from the weld
+  // object; polygon types 1 and 2 select its above and below seam records.
+  std::unordered_map<std::uint32_t, WeldDefinition> weld_definitions;
+  if (const auto* welding =
+          populated_table(*storage, schema, std::array<std::string_view, 1>{"welding"})) {
+    const auto* id = find_field(schema, *welding, "id");
+    const auto* common = find_field(schema, *welding, "weld_common_attr_id");
+    const auto* above = find_field(schema, *welding, "weld_seam1_id");
+    const auto* below = find_field(schema, *welding, "weld_seam2_id");
+    if (id != nullptr && common != nullptr && above != nullptr && below != nullptr) {
+      const auto& layout = storage->layout.tables[welding->ordinal];
+      weld_definitions.reserve(static_cast<std::size_t>(layout.info.row_count));
+      for (std::uint64_t row = 0; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(storage->payload.bytes(), row);
+        if (hidden(record)) continue;
+        const auto tuple = record.subspan(1U, welding->tuple_size);
+        weld_definitions.insert_or_assign(
+            read_u32(tuple, id->offset),
+            WeldDefinition{read_u32(tuple, common->offset), read_u32(tuple, above->offset),
+                           read_u32(tuple, below->offset)});
+      }
+    }
+  }
+  std::unordered_map<std::uint32_t, WeldCommonGeometry> weld_common_geometry;
+  if (const auto* common = populated_table(
+          *storage, schema, std::array<std::string_view, 1>{"welding_common_attr"})) {
+    const auto* id = find_field(schema, *common, "id");
+    const auto* compound = find_field(schema, *common, "compound_weld");
+    const auto* logical = find_field(schema, *common, "logical_weld");
+    if (id != nullptr && compound != nullptr && logical != nullptr) {
+      const auto& layout = storage->layout.tables[common->ordinal];
+      weld_common_geometry.reserve(static_cast<std::size_t>(layout.info.row_count));
+      for (std::uint64_t row = 0; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(storage->payload.bytes(), row);
+        if (hidden(record)) continue;
+        const auto tuple = record.subspan(1U, common->tuple_size);
+        weld_common_geometry.insert_or_assign(
+            read_u32(tuple, id->offset),
+            WeldCommonGeometry{read_u32(tuple, compound->offset) != 0U,
+                               read_u32(tuple, logical->offset) != 0U});
+      }
+    }
+  }
+  std::unordered_map<std::uint32_t, WeldSeamGeometry> weld_seam_geometry;
+  if (const auto* seams =
+          populated_table(*storage, schema, std::array<std::string_view, 1>{"welding_attr"})) {
+    const auto* id = find_field(schema, *seams, "id");
+    const auto* size = find_field(schema, *seams, "size");
+    const auto* type = find_field(schema, *seams, "type");
+    if (id != nullptr && size != nullptr && type != nullptr) {
+      const auto& layout = storage->layout.tables[seams->ordinal];
+      weld_seam_geometry.reserve(static_cast<std::size_t>(layout.info.row_count));
+      for (std::uint64_t row = 0; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(storage->payload.bytes(), row);
+        if (hidden(record)) continue;
+        const auto tuple = record.subspan(1U, seams->tuple_size);
+        weld_seam_geometry.insert_or_assign(
+            read_u32(tuple, id->offset),
+            WeldSeamGeometry{scalar(tuple, *size), read_u32(tuple, type->offset)});
+      }
+    }
+  }
+  std::unordered_map<std::uint32_t, std::uint32_t> weld_polygon_owners;
+  if (const auto* relations = schema.find_table("relation")) {
+    const auto* type = find_field(schema, *relations, "type");
+    const auto* source = find_field(schema, *relations, "id1");
+    const auto* target = find_field(schema, *relations, "id2");
+    if (type != nullptr && source != nullptr && target != nullptr) {
+      const auto& layout = storage->layout.tables[relations->ordinal];
+      for (std::uint64_t row = 0; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(storage->payload.bytes(), row);
+        if (hidden(record)) continue;
+        const auto tuple = record.subspan(1U, relations->tuple_size);
+        if (read_u32(tuple, type->offset) != 40'001U) continue;
+        const auto weld_id = read_u32(tuple, source->offset);
+        const auto object = object_types.find(weld_id);
+        if (weld_id < request.geometry_object_id_min || weld_id > request.geometry_object_id_max ||
+            object == object_types.end() || object->second.type != 13U ||
+            !weld_definitions.contains(weld_id))
+          continue;
+        weld_polygon_owners.insert_or_assign(read_u32(tuple, target->offset), weld_id);
+      }
+    }
+  }
+  std::unordered_map<std::uint32_t, std::vector<WeldPolygonRow>> weld_polygon_rows;
+  std::unordered_set<std::uint32_t> invalid_weld_polygons;
+  std::unordered_set<std::uint32_t> limited_weld_polygons;
+  if (const auto* polygons =
+          populated_table(*storage, schema, std::array<std::string_view, 1>{"weldingpolygon"})) {
+    const auto* id = find_field(schema, *polygons, "id");
+    const auto* number = find_field(schema, *polygons, "no");
+    const auto* count = find_field(schema, *polygons, "number_of_points_in_row");
+    const auto* type = find_field(schema, *polygons, "type");
+    if (id != nullptr && number != nullptr && count != nullptr && type != nullptr) {
+      const auto& layout = storage->layout.tables[polygons->ordinal];
+      for (std::uint64_t row = 0; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(storage->payload.bytes(), row);
+        if (hidden(record)) continue;
+        const auto tuple = record.subspan(1U, polygons->tuple_size);
+        const auto polygon_id = read_u32(tuple, id->offset);
+        const auto owner = weld_polygon_owners.find(polygon_id);
+        if (owner == weld_polygon_owners.end()) continue;
+        const auto polygon_type = read_u32(tuple, type->offset);
+        const auto weld = weld_definitions.find(owner->second);
+        if (weld == weld_definitions.end()) continue;
+        const auto common = weld_common_geometry.find(weld->second.common_attribute_id);
+        if (common == weld_common_geometry.end() || common->second.compound ||
+            common->second.logical)
+          continue;
+        const auto seam_id = polygon_type == 1U   ? weld->second.above_attribute_id
+                             : polygon_type == 2U ? weld->second.below_attribute_id
+                                                  : 0U;
+        const auto seam = weld_seam_geometry.find(seam_id);
+        if (seam == weld_seam_geometry.end() || seam->second.type != 10U ||
+            !std::isfinite(seam->second.size) || seam->second.size <= 0.0)
+          continue;
+        const auto point_count = static_cast<std::size_t>(read_u32(tuple, count->offset));
+        if (point_count == 0U || point_count > 10U) {
+          invalid_weld_polygons.insert(polygon_id);
+          continue;
+        }
+        const auto retained_bytes = sizeof(WeldPolygonRow) + point_count * sizeof(Vector3d);
+        if (!geometry_budget.consume_decode_bytes(retained_bytes)) {
+          limited_weld_polygons.insert(polygon_id);
+          continue;
+        }
+        WeldPolygonRow decoded{.number = read_u32(tuple, number->offset), .type = polygon_type};
+        decoded.values.reserve(point_count);
+        bool complete = true;
+        for (std::size_t index = 1U; index <= point_count; ++index) {
+          const auto suffix = std::to_string(index);
+          const auto* x = find_field(schema, *polygons, "x" + suffix);
+          const auto* y = find_field(schema, *polygons, "y" + suffix);
+          const auto* z = find_field(schema, *polygons, "z" + suffix);
+          if (x == nullptr || y == nullptr || z == nullptr) {
+            complete = false;
+            break;
+          }
+          decoded.values.push_back({scalar(tuple, *x), scalar(tuple, *y), scalar(tuple, *z)});
+        }
+        if (!complete) {
+          invalid_weld_polygons.insert(polygon_id);
+          continue;
+        }
+        weld_polygon_rows[polygon_id].push_back(std::move(decoded));
+      }
+    }
+  }
+  std::unordered_map<std::uint32_t, std::size_t> weld_mesh_indices;
+  for (auto& [polygon_id, rows] : weld_polygon_rows) {
+    const auto owner = weld_polygon_owners.find(polygon_id);
+    if (owner == weld_polygon_owners.end()) continue;
+    if (limited_weld_polygons.contains(polygon_id)) {
+      diagnostics.push_back({ErrorCode::resource_limit, owner->second,
+                             "Polygon-weld rows exceed the aggregate geometry memory budget."});
+      continue;
+    }
+    std::sort(rows.begin(), rows.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.number < rhs.number; });
+    const auto polygon_type = rows.empty() ? 0U : rows.front().type;
+    bool valid = !rows.empty();
+    for (std::size_t index = 0U; index < rows.size(); ++index) {
+      valid = valid && rows[index].number == index && rows[index].type == polygon_type;
+    }
+    if (invalid_weld_polygons.contains(polygon_id) || !valid) {
+      diagnostics.push_back({ErrorCode::invalid_geometry, owner->second,
+                             "Persisted polygon-weld rows are incomplete or out of sequence."});
+      continue;
+    }
+    const auto weld = weld_definitions.find(owner->second);
+    const auto seam_id =
+        polygon_type == 1U ? weld->second.above_attribute_id : weld->second.below_attribute_id;
+    const auto seam = weld_seam_geometry.find(seam_id);
+    const auto system = systems.find(owner->second);
+    if (seam == weld_seam_geometry.end() || system == systems.end() ||
+        !axes.contains(system->second.axes_id)) {
+      diagnostics.push_back({ErrorCode::decoder_unavailable, owner->second,
+                             "Polygon-weld seam or coordinate frame is unavailable."});
+      continue;
+    }
+    const auto found = weld_mesh_indices.find(owner->second);
+    const MeshData empty{.object_id = owner->second};
+    const auto& retained = found == weld_mesh_indices.end() ? empty : meshes[found->second];
+    const auto plan = plan_weld_fillet_sweep(retained, rows, seam->second.size, system->second,
+                                             axes.at(system->second.axes_id));
+    if (!plan) {
+      diagnostics.push_back({ErrorCode::invalid_geometry, owner->second,
+                             "Persisted polygon-weld path or frame is invalid."});
+      continue;
+    }
+    if (!geometry_budget.consume_mesh(plan->position_growth, plan->index_growth,
+                                      found == weld_mesh_indices.end())) {
+      diagnostics.push_back({ErrorCode::resource_limit, owner->second,
+                             "Polygon-weld mesh exceeds the aggregate geometry memory budget."});
+      continue;
+    }
+    std::size_t mesh_index = 0U;
+    if (found == weld_mesh_indices.end()) {
+      mesh_index = meshes.size();
+      weld_mesh_indices.emplace(owner->second, mesh_index);
+      meshes.push_back(empty);
+    } else {
+      mesh_index = found->second;
+    }
+    append_weld_fillet_sweep(meshes[mesh_index], rows, seam->second.size, system->second,
+                             axes.at(system->second.axes_id), *plan);
+  }
+  for (const auto polygon_id : invalid_weld_polygons) {
+    if (weld_polygon_rows.contains(polygon_id)) continue;
+    const auto owner = weld_polygon_owners.find(polygon_id);
+    if (owner != weld_polygon_owners.end()) {
+      diagnostics.push_back({ErrorCode::invalid_geometry, owner->second,
+                             "Persisted polygon-weld row has an invalid point count."});
+    }
+  }
+  for (const auto polygon_id : limited_weld_polygons) {
+    if (weld_polygon_rows.contains(polygon_id)) continue;
+    const auto owner = weld_polygon_owners.find(polygon_id);
+    if (owner != weld_polygon_owners.end()) {
+      diagnostics.push_back({ErrorCode::resource_limit, owner->second,
+                             "Polygon-weld rows exceed the aggregate geometry memory budget."});
     }
   }
 
@@ -1821,11 +2793,12 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
                                         : std::nullopt;
           const auto longitudinal_radius = size_pair ? rebar_radius((*size_pair)[0]) : std::nullopt;
           const auto cross_radius = size_pair ? rebar_radius((*size_pair)[1]) : std::nullopt;
-          const auto longitudinal_spacing =
-              spacing_pair ? positive_number((*spacing_pair)[0]) : std::nullopt;
-          const auto cross_spacing =
-              spacing_pair ? positive_number((*spacing_pair)[1]) : std::nullopt;
-          if (!longitudinal_radius || !cross_radius || !longitudinal_spacing || !cross_spacing ||
+          const double longitudinal_spacing =
+              spacing_pair ? positive_number((*spacing_pair)[0]).value_or(0.0) : 0.0;
+          const double cross_spacing =
+              spacing_pair ? positive_number((*spacing_pair)[1]).value_or(0.0) : 0.0;
+          if (!longitudinal_radius || !cross_radius || longitudinal_spacing <= 0.0 ||
+              cross_spacing <= 0.0 ||
               geometry.status != LinkedDecodeStatus::success ||
               (bending != nullptr &&
                (bending->status != LinkedDecodeStatus::success || bending->value.empty()))) {
@@ -1852,10 +2825,10 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
                 vector_length(subtract(distribution_end, distribution_start));
             auto cross_count =
                 regular_distance_count(mesh_attribute->second.longitudinal_overhang_left,
-                                       distribution_length, *cross_spacing);
+                                       distribution_length, cross_spacing);
             auto longitudinal_count =
                 regular_distance_count(mesh_attribute->second.cross_overhang_left,
-                                       mesh_attribute->second.width, *longitudinal_spacing);
+                                       mesh_attribute->second.width, longitudinal_spacing);
             if (!cross_count || !longitudinal_count) {
               const auto& error = !cross_count ? cross_count.error() : longitudinal_count.error();
               diagnostics.push_back({error.code, rebar_id, error.message});
@@ -1889,13 +2862,13 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
           Result<MeshCenterlines> evaluated =
               object->second.subtype == 6U
                   ? polygon_mesh_centerlines(
-                        polygon, geometry.value, *longitudinal_spacing, *cross_spacing,
+                        polygon, geometry.value, longitudinal_spacing, cross_spacing,
                         mesh_attribute->second.longitudinal_overhang_left,
                         mesh_attribute->second.cross_overhang_left, *longitudinal_radius,
                         *cross_radius, mesh_attribute->second.flags, remaining_count)
                   : bent_mesh_centerlines(polygon, geometry.value, bending->value.front(),
-                                          mesh_attribute->second.width, *longitudinal_spacing,
-                                          *cross_spacing,
+                                          mesh_attribute->second.width, longitudinal_spacing,
+                                          cross_spacing,
                                           mesh_attribute->second.longitudinal_overhang_left,
                                           mesh_attribute->second.cross_overhang_left,
                                           *longitudinal_radius, *cross_radius, remaining_count);
@@ -2195,8 +3168,9 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
     }
   }
 
-  return Result<ProcessStream>::success(std::make_unique<NonPartReader>(
-      std::move(curves), std::move(meshes), std::move(diagnostics), batch_size));
+  return Result<ProcessStream>::success(
+      std::make_unique<NonPartReader>(std::move(curves), std::move(meshes), std::move(diagnostics),
+                                      std::move(mesh_placements), batch_size));
 }
 
 }  // namespace tekla::db1::detail

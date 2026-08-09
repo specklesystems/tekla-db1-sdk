@@ -8,9 +8,48 @@ compatibility policy in the support matrix.
 
 ### Added
 
+- Persisted rebar sets, generated groups, end-detail modifiers, and splitters
+  expose stable identities, stored reinforcement and modifier properties, and
+  deterministic owner-child relationships.
+- Persisted surface objects expose stable identities, stored surface properties,
+  and deterministic host-part relationships.
+- Persisted rebar splices expose stable identities, splice dimensions and
+  endpoint semantics, plus deterministic connections to both reinforcement
+  objects.
+- Persisted pour objects and pour units expose stable identities, stored class,
+  phase, number, type, concrete-mixture, and unit-name properties, plus
+  deterministic pour-object-to-unit membership relationships. Their visible
+  concrete continues to come from the ordinary member parts; no duplicate pour
+  mesh is synthesized.
+- Persisted type-73 tile surface treatments expose stable identities, native
+  name/thickness/material semantics, father-part relationships, and closed
+  treatment solids from their stored polygon, placement, and numeric thickness.
+  Opt-in placed meshes keep repeated treatment contours reusable.
+- Opt-in placed display meshes expose object-local float coordinates with a
+  per-mesh rigid placement while preserving model-space output as the default
+  and falling back independently for non-rigid persisted frames.
+- Persisted weld common/seam attributes emit ordinary `Tekla` properties for
+  workshop/site, around, compound, logical, intermittent, size, and type
+  semantics. Weld occurrences are decoded row-by-row into bounded reusable
+  property batches rather than retained for the life of the stream.
+- Proven modern polygon-weld fillet paths emit closed `MeshView` display
+  geometry on their owning weld objects. Persisted rows and generated meshes
+  share the non-part geometry memory budget and malformed paths fail open with
+  object-scoped diagnostics.
 - `ObjectRole`, `object_role`, and `is_model_element` distinguish independently
   publishable model elements from Boolean-part and cut-plane evaluation
   features while retaining all persisted identities for raw processing.
+- Persisted Boolean-add operands fuse into their visible host before cut and
+  weld-preparation operands are subtracted, including nested graphs carried
+  through the supervised OCCT worker protocol.
+- The built-in nominal steel fallback resolves the EN 10365
+  `PFC200*90*30` channel with its published dimensions, root radii, area, and
+  cover perimeter when a model-local LIS catalog is unavailable.
+- Proven `SPHEREd` and `CAPd` user-parametric profiles emit their persisted
+  multi-cross-section solids, including the CAP inner skin, before ordinary
+  fittings and Boolean operations are evaluated.
+- Boolean-add operands preserve hollow profile material instead of fusing the
+  filled outer envelope used by subtractive cutters.
 
 ### Changed
 
@@ -83,6 +122,8 @@ Initial release candidate of the read-only, output-neutral C++20 SDK.
   tolerance-bounded adapter parity case rather than an exact SDK scalar.
 - OCCT topology evaluation is optional and excluded from the WASM-oriented core
   path.
+- Polygon-weld display geometry is not yet decoded; supported weld identities
+  and native properties remain available as semantic-only objects.
 
 See `docs/support-matrix.md` for the precise implemented contract and
 `docs/releasing.md` for the release gates.

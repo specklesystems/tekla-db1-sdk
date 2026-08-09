@@ -445,6 +445,35 @@ int main(int argc, char** argv) {
           "direct and supervised nested CSG results are identical");
   }
 
+  // Tekla Boolean parts distinguish additive operands from cuts. The complete
+  // shape must fuse all additive children before applying subtractive ones,
+  // and that graph must survive the supervised worker protocol unchanged.
+  OcctRequest union_request;
+  union_request.object_id = 440;
+  union_request.nodes = {
+      {.object_id = 440,
+       .base_mesh = cube(0, 0, 0, 10, 10, 10),
+       .union_nodes = {1},
+       .subtract_nodes = {2}},
+      {.object_id = 441, .base_mesh = cube(8, 0, 0, 14, 10, 10)},
+      {.object_id = 442, .base_mesh = cube(9, 2, -1, 11, 8, 11)},
+  };
+  auto union_direct = direct_host.evaluate(union_request);
+  CHECK(union_direct.has_value(), "an additive CSG child evaluates before the root cut");
+  if (union_direct) {
+    CHECK(std::abs(volume(union_direct.value()) - 1280.0) < 1.0e-3,
+          "an additive child contributes material before subtraction");
+    CHECK(std::abs(bounds(union_direct.value())[3] - 14.0F) < 1.0e-5F,
+          "an additive child extends the visible root bounds");
+  }
+  auto union_supervised = supervised_host.evaluate(union_request);
+  CHECK(union_supervised.has_value(), "an additive CSG graph crosses the worker protocol");
+  if (union_direct && union_supervised) {
+    CHECK(union_supervised.value().positions == union_direct.value().positions &&
+              union_supervised.value().indices == union_direct.value().indices,
+          "direct and supervised additive CSG results are identical");
+  }
+
   OcctRequest split_request;
   split_request.object_id = 47;
   split_request.nodes = {

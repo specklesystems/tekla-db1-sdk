@@ -17,8 +17,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Windows development packages
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: vcpkg install zlib:x64-mingw-static
+
       - name: Configure
+        if: runner.os != 'Windows'
         run: cmake --preset ci
+
+      - name: Configure Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          cmake --preset ci
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-mingw-static
 
       - name: Build
         run: cmake --build --preset ci
@@ -40,7 +54,18 @@ jobs:
           -P cmake/VerifyReleaseArtifacts.cmake
 
       - name: Configure installed-package consumer
+        if: runner.os != 'Windows'
         run: cmake -S tests/consumer -B build/consumer -DCMAKE_PREFIX_PATH="${{ runner.temp }}/tekla-db1-sdk"
+
+      - name: Configure installed-package consumer on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          cmake -S tests/consumer -B build/consumer -G Ninja
+          -DCMAKE_CXX_COMPILER=C:/mingw64/bin/c++.exe
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-mingw-static
+          "-DCMAKE_PREFIX_PATH=${{ runner.temp }}/tekla-db1-sdk"
 
       - name: Build installed-package consumer
         run: cmake --build build/consumer --config Release
@@ -49,7 +74,19 @@ jobs:
         run: ctest --test-dir build/consumer -C Release --output-on-failure
 
       - name: Configure core-only installed-package consumer
+        if: runner.os != 'Windows'
         run: cmake -S tests/consumer -B build/consumer-core -DCMAKE_PREFIX_PATH="${{ runner.temp }}/tekla-db1-sdk" -DTEKLA_DB1_CONSUMER_REQUIRE_GLTF=OFF
+
+      - name: Configure core-only installed-package consumer on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          cmake -S tests/consumer -B build/consumer-core -G Ninja
+          -DCMAKE_CXX_COMPILER=C:/mingw64/bin/c++.exe
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-mingw-static
+          "-DCMAKE_PREFIX_PATH=${{ runner.temp }}/tekla-db1-sdk"
+          -DTEKLA_DB1_CONSUMER_REQUIRE_GLTF=OFF
 
       - name: Build core-only installed-package consumer
         run: cmake --build build/consumer-core --config Release
@@ -80,6 +117,14 @@ jobs:
           libocct-foundation-dev
           libocct-modeling-data-dev
           libocct-modeling-algorithms-dev
+          libtbb-dev
+
+      - name: Restore matching OCCT package header
+        run: |
+          sudo curl -fsSL \
+            https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/V7_6_3/src/NCollection/NCollection_AliasedArray.hxx \
+            -o /usr/include/opencascade/NCollection_AliasedArray.hxx
+          echo "f3a4f8ec0cb0292ad8538fb5714fdf90149a989fb47e14383a1205a0c4889d59  /usr/include/opencascade/NCollection_AliasedArray.hxx" | sha256sum -c -
 
       - name: Configure OCCT build
         run: cmake --preset occt

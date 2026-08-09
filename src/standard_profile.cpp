@@ -1627,6 +1627,29 @@ constexpr std::array<std::array<double, 2>, 24> kUnp200{{
     {-37.5, 100.0},
 }};
 
+// EN 10365 PFC 200 x 90 x 30. The section designation's final value is the
+// nominal mass per metre, not a thickness. Dimensions are h=200, b=90,
+// tw=7, tf=14, r=12 mm. Four chords retain each published root radius while
+// keeping the compact fallback deterministic.
+constexpr std::array<std::array<double, 2>, 16> kPfc200_90_30{{
+    {-100.0, -45.0},
+    {100.0, -45.0},
+    {100.0, 45.0},
+    {86.0, 45.0},
+    {86.0, -26.0},
+    {85.08655439013544, -30.59220118838108},
+    {82.48528137423857, -34.48528137423857},
+    {78.59220118838108, -37.08655439013544},
+    {74.0, -38.0},
+    {-74.0, -38.0},
+    {-78.59220118838108, -37.08655439013544},
+    {-82.48528137423857, -34.48528137423857},
+    {-85.08655439013544, -30.59220118838108},
+    {-86.0, -26.0},
+    {-86.0, 45.0},
+    {-100.0, 45.0},
+}};
+
 constexpr std::array<std::array<double, 2>, 134> kThyssenT85N075{{
     {-42.2, -308.53},  {-33.78, -314.59}, {-25.36, -320.66}, {-22.48, -325.92}, {-19.59, -331.18},
     {10.92, -350.12},  {41.45, -369.06},  {41.45, -414.56},  {35.63, -428.14},  {41.45, -441.72},
@@ -1676,7 +1699,7 @@ constexpr std::array<ProfileRecord, 52> kProfiles{{
 // This compact fallback covers the standard sections exercised by packages
 // that do not ship model-local LIS catalog records. A local catalog remains
 // authoritative whenever it is available.
-constexpr std::array<MetricRecord, 12> kMetrics{{
+constexpr std::array<MetricRecord, 13> kMetrics{{
     {"HEA240", {7680.0, 1370.0000050, 230.0, 240.0}},
     {"IPE100", {1030.0, 400.0000060, 100.0, 55.0}},
     {"IPE160", {2010.0, 623.0000257, 160.0, 82.0}},
@@ -1685,6 +1708,7 @@ constexpr std::array<MetricRecord, 12> kMetrics{{
     {"IPE300", {5380.0, 1159.0000390, 300.0, 150.0}},
     {"L150*75*9", {1960.0, 441.0000145, 150.0, 75.0}},
     {"L90*9", {1550.0, 351.0000110, 90.0, 90.0}},
+    {"PFC200*90*30", {3790.0, 736.0, 200.0, 90.0}},
     {"RO26.9*2.6", {189.54, 83.60760515039806, 26.9, 26.9}},
     {"RO48.3*3.2", {453.0, 152.0, 48.29999924, 48.29999924}},
     {"THYSSEN-T85-N-0.75", {1151.085814, 1120.0, 84.4000015258789, 1166.1800537109375}},
@@ -1696,6 +1720,7 @@ constexpr std::array<MetricRecord, 12> kMetrics{{
 std::optional<std::span<const std::array<double, 2>>> standard_profile_contour(
     std::string_view name) noexcept {
   if (name == "HSW-E150*0.88") return std::span{kHswE150_088};
+  if (name == "PFC200*90*30") return std::span{kPfc200_90_30};
   if (name == "UNP100") return std::span{kUnp100};
   if (name == "UNP140") return std::span{kUnp140};
   if (name == "UNP200") return std::span{kUnp200};

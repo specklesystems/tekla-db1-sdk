@@ -19,9 +19,12 @@ clang-format -i include/**/*.hpp src/*.cpp adapters/**/*.cpp tests/*.cpp
 
 ## Tests
 
-Tests exercise public interfaces. Add one behavioral test and its minimum
-implementation at a time. The default test suite must not require a Tekla
-installation or external model files.
+Tests exercise public SDK interfaces by default. A narrow internal module may
+have a direct contract test when failure injection or an arithmetic boundary
+cannot be observed through `Model::process` without a model-sized fixture;
+production code must not expose test-only APIs. Add one behavioral test and its
+minimum implementation at a time. The default test suite must not require a
+Tekla installation or external model files.
 
 Extended compatibility and performance runs are release gates, but their input
 datasets and generated output remain outside this repository.

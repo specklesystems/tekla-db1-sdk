@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -79,6 +80,22 @@ void replace_ascii_once(std::vector<std::byte>& bytes, std::string_view from, st
   std::copy(replacement, replacement + to.size(), found);
 }
 
+enum class PartFrameFixture {
+  orthogonal,
+  skewed,
+  rotated,
+};
+
+enum class PolygonWeldFrameFixture {
+  orthogonal,
+  leg_parallel_to_tangent,
+  leg_almost_parallel_to_tangent,
+  reversed_handedness,
+  noisy_tangent_component,
+  collinear_model_basis,
+  large_model_origin,
+};
+
 void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schema& schema,
                   const tekla::db1::detail::TableSchema& table, bool final,
                   std::string_view profile = "200*10", std::string_view object_class = "14",
@@ -89,7 +106,9 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
                   bool zero_transverse_axis = false, bool duplicate_property_fixture = false,
                   bool report_fixture = false, bool zero_position_report_fixture = false,
                   bool bolt_fixture = false, bool legacy_bolt_fixture = false,
-                  bool assembly_fixture = false) {
+                  bool assembly_fixture = false,
+                  PartFrameFixture part_frame = PartFrameFixture::orthogonal,
+                  bool mixed_contour = false) {
   constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
                                                std::byte{0xdb}};
   constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
@@ -128,6 +147,25 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
     append_u32(bytes, 7);
     append_u32(bytes, 91);
     append_u32(bytes, 92);
+    if (weld_fixture) {
+      bytes.push_back(std::byte{0});
+      const auto tuple_offset = bytes.size();
+      bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+      auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id" || field.name == "kuuluu") write_u32(tuple, field.offset, 1202U);
+        if (field.name == "assembly") write_u32(tuple, field.offset, 700U);
+        if (field.name == "type") write_u32(tuple, field.offset, 13U);
+        if (field.name == "subtype") write_u32(tuple, field.offset, 0U);
+        if (field.name == "guid") {
+          for (std::size_t index = 0; index < field.size; ++index) {
+            tuple[field.offset + index] = static_cast<std::byte>(0xd0U + index);
+          }
+        }
+      }
+      append_u32(bytes, 93U);
+      append_u32(bytes, 94U);
+    }
     if (component_fixture) {
       const auto append_object = [&](std::uint32_t id, std::uint32_t parent, std::uint32_t type,
                                      std::uint8_t guid_seed) {
@@ -335,27 +373,60 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
     append_u32(bytes, 2300U);
     append_u32(bytes, 2400U);
   } else if (weld_fixture && table.name == "welding") {
-    bytes.push_back(std::byte{0});
-    const auto tuple_offset = bytes.size();
-    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
-    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
-    for (const auto& field : schema.table_fields(table)) {
-      if (field.name == "id") write_u32(tuple, field.offset, 1201U);
-      if (field.name == "weld_common_attr_id") write_u32(tuple, field.offset, 901U);
-    }
-    append_u32(bytes, 2500U);
-    append_u32(bytes, 2600U);
+    const auto append_weld = [&](std::uint32_t id, std::uint32_t common_id) {
+      bytes.push_back(std::byte{0});
+      const auto tuple_offset = bytes.size();
+      bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+      auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, id);
+        if (field.name == "weld_common_attr_id") write_u32(tuple, field.offset, common_id);
+        if (field.name == "weld_seam1_id") write_u32(tuple, field.offset, 902U);
+        if (field.name == "weld_seam2_id") write_u32(tuple, field.offset, 903U);
+      }
+      append_u32(bytes, id + 1300U);
+      append_u32(bytes, id + 1400U);
+    };
+    append_weld(1201U, 901U);
+    append_weld(1202U, 904U);
   } else if (weld_fixture && table.name == "welding_common_attr") {
-    bytes.push_back(std::byte{0});
-    const auto tuple_offset = bytes.size();
-    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
-    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
-    for (const auto& field : schema.table_fields(table)) {
-      if (field.name == "id") write_u32(tuple, field.offset, 901U);
-      if (field.name == "workshop_weld") write_u32(tuple, field.offset, 1U);
-    }
-    append_u32(bytes, 2700U);
-    append_u32(bytes, 2800U);
+    const auto append_common = [&](std::uint32_t id, std::uint32_t workshop) {
+      bytes.push_back(std::byte{0});
+      const auto tuple_offset = bytes.size();
+      bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+      auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, id);
+        if (field.name == "around_weld") write_u32(tuple, field.offset, 1U);
+        if (field.name == "workshop_weld") write_u32(tuple, field.offset, workshop);
+        if (field.name == "compound_weld") write_u32(tuple, field.offset, 1U);
+        if (field.name == "logical_weld") write_u32(tuple, field.offset, 0U);
+        if (field.name == "intermittent_type") write_u32(tuple, field.offset, 2U);
+      }
+      append_u32(bytes, id + 1800U);
+      append_u32(bytes, id + 1900U);
+    };
+    append_common(901U, 1U);
+    append_common(904U, 0U);
+  } else if (weld_fixture && table.name == "welding_attr") {
+    const auto append_weld_attribute = [&](std::uint32_t id, float size, std::uint32_t type,
+                                           std::uint32_t intermittent) {
+      bytes.push_back(std::byte{0});
+      const auto tuple_offset = bytes.size();
+      bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+      auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, id);
+        if (field.name == "size")
+          write_u32(tuple, field.offset, std::bit_cast<std::uint32_t>(size));
+        if (field.name == "type") write_u32(tuple, field.offset, type);
+        if (field.name == "intermittent") write_u32(tuple, field.offset, intermittent);
+      }
+      append_u32(bytes, id + 100U);
+      append_u32(bytes, id + 200U);
+    };
+    append_weld_attribute(902U, 5.0F, 10U, 1U);
+    append_weld_attribute(903U, 3.0F, 6U, 0U);
   } else if ((bolt_fixture || legacy_bolt_fixture) && table.name == "bolt") {
     bytes.push_back(std::byte{0});
     const auto tuple_offset = bytes.size();
@@ -561,9 +632,15 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
       append_u32(bytes, id + 100U);
       append_u32(bytes, id + 101U);
     };
-    append_axes(
-        901U, {1.0, 0.0, 0.0},
-        zero_transverse_axis ? tekla::db1::Vector3d{} : tekla::db1::Vector3d{0.0, 1.0, 0.0});
+    const auto x_axis = part_frame == PartFrameFixture::rotated
+                            ? tekla::db1::Vector3d{0.0, 1.0, 0.0}
+                            : tekla::db1::Vector3d{1.0, 0.0, 0.0};
+    const auto y_axis =
+        zero_transverse_axis                      ? tekla::db1::Vector3d{}
+        : part_frame == PartFrameFixture::skewed  ? tekla::db1::Vector3d{0.5, 1.0, 0.0}
+        : part_frame == PartFrameFixture::rotated ? tekla::db1::Vector3d{-1.0, 0.0, 0.0}
+                                                  : tekla::db1::Vector3d{0.0, 1.0, 0.0};
+    append_axes(901U, x_axis, y_axis);
     if (edge_chamfer) {
       constexpr double diagonal = 0.7071067811865476;
       append_axes(991U, {0.0, 0.0, -1.0}, {diagonal, diagonal, 0.0});
@@ -686,11 +763,14 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
     constexpr std::array<double, 4> contour_y{0.0, 0.0, 300.0, 300.0};
     constexpr std::array<double, 5> arc_x{0.0, 150.0, 300.0, 300.0, 0.0};
     constexpr std::array<double, 5> arc_y{0.0, -100.0, 0.0, 300.0, 300.0};
+    constexpr std::array<double, 5> mixed_x{0.0, 300.0, 400.0, 300.0, 0.0};
+    constexpr std::array<double, 5> mixed_y{0.0, 0.0, 150.0, 300.0, 300.0};
     constexpr std::array<double, 3> path_x{0.0, 500.0, 1000.0};
     constexpr std::array<double, 3> path_y{0.0, 500.0, 0.0};
-    const auto point_count = polybeam      ? path_x.size()
-                             : arc_contour ? arc_x.size()
-                                           : contour_x.size();
+    const auto point_count = polybeam        ? path_x.size()
+                             : mixed_contour ? mixed_x.size()
+                             : arc_contour   ? arc_x.size()
+                                             : contour_x.size();
     for (const auto& field : schema.table_fields(table)) {
       if (field.name == "id") write_u32(tuple, field.offset, 960);
       for (std::size_t index = 0; index < 10; ++index) {
@@ -703,25 +783,31 @@ void append_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schem
           }
         };
         if (field.name == "x" + suffix) {
-          write_scalar(index < point_count ? polybeam      ? path_x[index]
-                                             : arc_contour ? arc_x[index]
-                                                           : contour_x[index]
+          write_scalar(index < point_count ? polybeam        ? path_x[index]
+                                             : mixed_contour ? mixed_x[index]
+                                             : arc_contour   ? arc_x[index]
+                                                             : contour_x[index]
                                            : 0.0);
         }
         if (field.name == "y" + suffix) {
-          write_scalar(index < point_count ? polybeam      ? path_y[index]
-                                             : arc_contour ? arc_y[index]
-                                                           : contour_y[index]
+          write_scalar(index < point_count ? polybeam        ? path_y[index]
+                                             : mixed_contour ? mixed_y[index]
+                                             : arc_contour   ? arc_y[index]
+                                                             : contour_y[index]
                                            : 0.0);
         }
         if (field.name == "z" + suffix) write_scalar(0.0);
         if (field.name == "dx" + suffix || field.name == "dy" + suffix) {
-          write_scalar(contour && !arc_contour && index < point_count ? 150.0 : 0.0);
+          write_scalar(mixed_contour && index == 0U                                       ? 50.0
+                       : contour && !arc_contour && !mixed_contour && index < point_count ? 150.0
+                                                                                          : 0.0);
         }
         if (field.name == "types" + suffix) {
-          const auto corner_type = arc_contour && index == 1U ? 40U
-                                   : contour && !arc_contour  ? 20U
-                                                              : 0U;
+          const auto corner_type = mixed_contour && index == 0U   ? 20U
+                                   : mixed_contour && index == 2U ? 40U
+                                   : arc_contour && index == 1U   ? 40U
+                                   : contour && !arc_contour      ? 20U
+                                                                  : 0U;
           write_u32(tuple, field.offset, index < point_count ? corner_type : 2'147'483'647U);
         }
       }
@@ -819,7 +905,8 @@ std::vector<std::byte> database_with_one_object(
     bool weld_fixture = false, bool zero_transverse_axis = false,
     bool duplicate_property_fixture = false, bool report_fixture = false,
     bool zero_position_report_fixture = false, bool bolt_fixture = false,
-    bool legacy_bolt_fixture = false, bool assembly_fixture = false) {
+    bool legacy_bolt_fixture = false, bool assembly_fixture = false,
+    PartFrameFixture part_frame = PartFrameFixture::orthogonal, bool mixed_contour = false) {
   constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
                                                std::byte{0xdb}};
   const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
@@ -840,7 +927,847 @@ std::vector<std::byte> database_with_one_object(
                    edge_chamfer, arc_contour, component_fixture, keyed_tables, weld_fixture,
                    zero_transverse_axis, duplicate_property_fixture, report_fixture,
                    zero_position_report_fixture, bolt_fixture, legacy_bolt_fixture,
-                   assembly_fixture);
+                   assembly_fixture, part_frame, mixed_contour);
+    }
+  }
+  return bytes;
+}
+
+void append_polygon_weld_table(std::vector<std::byte>& bytes,
+                               const tekla::db1::detail::Schema& schema,
+                               const tekla::db1::detail::TableSchema& table, bool final,
+                               bool malformed_polygon, bool semantic_only,
+                               PolygonWeldFrameFixture frame_fixture, std::size_t polygon_count,
+                               std::size_t polygon_row_count) {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
+                                                  std::byte{0x00}};
+  append_u32(bytes, table.tuple_size);
+  append_u32(bytes, table.descriptor_count);
+  for (const auto descriptor : schema.table_descriptors(table)) append_u32(bytes, descriptor);
+
+  const auto append_tuple = [&](const auto& write) {
+    bytes.push_back(std::byte{0});
+    const auto tuple_offset = bytes.size();
+    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+    write(tuple);
+    append_u32(bytes, 10'001U);
+    append_u32(bytes, 20'001U);
+  };
+  const auto write_scalar = [](std::span<std::byte> tuple,
+                               const tekla::db1::detail::FieldSchema& field, double value) {
+    if (field.type == tekla::db1::detail::FieldType::f32) {
+      write_u32(tuple, field.offset, std::bit_cast<std::uint32_t>(static_cast<float>(value)));
+    } else {
+      write_f64(tuple, field.offset, value);
+    }
+  };
+
+  if (table.name == "object") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1201U);
+        if (field.name == "type") write_u32(tuple, field.offset, 13U);
+        if (field.name == "guid") {
+          for (std::size_t index = 0; index < field.size; ++index) {
+            tuple[field.offset + index] = static_cast<std::byte>(0x40U + index);
+          }
+        }
+      }
+    });
+  } else if (table.name == "coordsys_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 901U);
+        if (field.name == "xdir_x") {
+          write_scalar(tuple, field,
+                       frame_fixture == PolygonWeldFrameFixture::collinear_model_basis ? 1.0 : 0.0);
+        }
+        if (field.name == "xdir_y") {
+          write_scalar(tuple, field,
+                       frame_fixture == PolygonWeldFrameFixture::collinear_model_basis ? 0.0 : 1.0);
+        }
+        if (field.name == "xdir_z") write_scalar(tuple, field, 0.0);
+        if (field.name == "ydir_x") {
+          write_scalar(
+              tuple, field,
+              frame_fixture == PolygonWeldFrameFixture::collinear_model_basis ? 1.0 : -1.0);
+        }
+        if (field.name == "ydir_y") write_scalar(tuple, field, 0.0);
+        if (field.name == "ydir_z") write_scalar(tuple, field, 0.0);
+      }
+    });
+  } else if (table.name == "coordsys") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1201U);
+        if (field.name == "csys_attr_id") write_u32(tuple, field.offset, 901U);
+        const double origin =
+            frame_fixture == PolygonWeldFrameFixture::large_model_origin ? 1.0e9 : 0.0;
+        if (field.name == "x1") write_scalar(tuple, field, origin + 100.0);
+        if (field.name == "y1") write_scalar(tuple, field, origin + 200.0);
+        if (field.name == "z1") write_scalar(tuple, field, origin + 300.0);
+      }
+    });
+  } else if (table.name == "part_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 999U);
+        if (field.name == "prof") write_fixed(tuple, field.offset, field.size, "200*10");
+      }
+    });
+  } else if (table.name == "welding") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1201U);
+        if (field.name == "weld_common_attr_id") write_u32(tuple, field.offset, 902U);
+        if (field.name == "weld_seam1_id") write_u32(tuple, field.offset, 903U);
+      }
+    });
+  } else if (table.name == "welding_common_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 902U);
+        if (field.name == "workshop_weld") write_u32(tuple, field.offset, 1U);
+        if (field.name == "compound_weld" || field.name == "logical_weld") {
+          write_u32(tuple, field.offset, semantic_only ? 1U : 0U);
+        }
+      }
+    });
+  } else if (table.name == "welding_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 903U);
+        if (field.name == "size") write_scalar(tuple, field, 5.0);
+        if (field.name == "type") write_u32(tuple, field.offset, 10U);
+      }
+    });
+  } else if (table.name == "relation") {
+    for (std::size_t polygon = 0U; polygon < polygon_count; ++polygon) {
+      const auto polygon_id = static_cast<std::uint32_t>(950U + polygon);
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, polygon_id + 1U);
+          if (field.name == "type") write_u32(tuple, field.offset, 40'001U);
+          if (field.name == "id1") write_u32(tuple, field.offset, 1201U);
+          if (field.name == "id2") write_u32(tuple, field.offset, polygon_id);
+        }
+      });
+    }
+  } else if (table.name == "weldingpolygon") {
+    for (std::size_t polygon = 0U; polygon < polygon_count; ++polygon) {
+      const auto polygon_id = static_cast<std::uint32_t>(950U + polygon);
+      const auto value_count = polygon_row_count * 4U;
+      const auto segment_count = (value_count - 1U) / 3U;
+      std::vector<tekla::db1::Vector3d> path_values;
+      path_values.reserve(segment_count * 3U + 1U);
+      for (std::size_t segment = 0U; segment < segment_count; ++segment) {
+        path_values.push_back(
+            {static_cast<double>(polygon) * 20.0 + static_cast<double>(segment) * 10.0, 0.0, 0.0});
+        path_values.push_back(frame_fixture == PolygonWeldFrameFixture::leg_parallel_to_tangent
+                                  ? tekla::db1::Vector3d{1.0, 0.0, 0.0}
+                              : frame_fixture ==
+                                      PolygonWeldFrameFixture::leg_almost_parallel_to_tangent
+                                  ? tekla::db1::Vector3d{1.0, 1.0e-8, 0.0}
+                              : frame_fixture == PolygonWeldFrameFixture::noisy_tangent_component
+                                  ? tekla::db1::Vector3d{4.6e-5, 1.0, 0.0}
+                              : frame_fixture == PolygonWeldFrameFixture::reversed_handedness
+                                  ? tekla::db1::Vector3d{0.0, 0.0, 1.0}
+                                  : tekla::db1::Vector3d{0.0, 1.0, 0.0});
+        path_values.push_back(frame_fixture == PolygonWeldFrameFixture::reversed_handedness
+                                  ? tekla::db1::Vector3d{0.0, 1.0, 0.0}
+                                  : tekla::db1::Vector3d{0.0, 0.0, 1.0});
+      }
+      path_values.push_back(
+          {static_cast<double>(polygon) * 20.0 + static_cast<double>(segment_count) * 10.0, 0.0,
+           0.0});
+      CHECK(path_values.size() == value_count,
+            "the polygon-weld row fixture forms complete segment triples");
+      for (std::size_t row = 0U; row < polygon_row_count; ++row) {
+        append_tuple([&](std::span<std::byte> tuple) {
+          const auto points =
+              std::span<const tekla::db1::Vector3d>(path_values).subspan(row * 4U, 4U);
+          for (const auto& field : schema.table_fields(table)) {
+            if (field.name == "id") write_u32(tuple, field.offset, polygon_id);
+            if (field.name == "no") write_u32(tuple, field.offset, static_cast<std::uint32_t>(row));
+            if (field.name == "number_of_points_in_row") {
+              write_u32(tuple, field.offset, malformed_polygon ? 5U : 4U);
+            }
+            if (field.name == "type") write_u32(tuple, field.offset, 1U);
+            for (std::size_t index = 0; index < points.size(); ++index) {
+              const auto suffix = std::to_string(index + 1U);
+              if (field.name == "x" + suffix) write_scalar(tuple, field, points[index].x);
+              if (field.name == "y" + suffix) write_scalar(tuple, field, points[index].y);
+              if (field.name == "z" + suffix) write_scalar(tuple, field, points[index].z);
+            }
+          }
+        });
+      }
+    }
+  }
+
+  bytes.push_back(std::byte{0});
+  if (final) {
+    bytes.insert(bytes.end(), final_footer.begin(), final_footer.end());
+  } else {
+    bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  }
+}
+
+std::vector<std::byte> database_with_polygon_weld_geometry(
+    bool malformed_polygon = false, bool semantic_only = false,
+    PolygonWeldFrameFixture frame_fixture = PolygonWeldFrameFixture::orthogonal,
+    std::size_t polygon_count = 1U, std::size_t polygon_row_count = 1U) {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::string_view format = "9.66";
+  const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
+  CHECK(schema != nullptr, "the polygon-weld fixture schema is registered");
+  std::vector<std::byte> bytes;
+  append_ascii(bytes, "Xsteel");
+  bytes.push_back(std::byte{0x85});
+  bytes.push_back(std::byte{' '});
+  const auto* format_first = reinterpret_cast<const std::byte*>(format.data());
+  bytes.insert(bytes.end(), format_first, format_first + format.size());
+  append_ascii(bytes, " 7d72d8c9-0250-4f3a-8760-bcef517f016e");
+  append_u32(bytes, 1U);
+  bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  if (schema != nullptr) {
+    for (std::size_t index = 0; index < schema->tables.size(); ++index) {
+      append_polygon_weld_table(bytes, *schema, schema->tables[index],
+                                index + 1U == schema->tables.size(), malformed_polygon,
+                                semantic_only, frame_fixture, polygon_count, polygon_row_count);
+    }
+  }
+  return bytes;
+}
+
+void append_surface_treatment_table(std::vector<std::byte>& bytes,
+                                    const tekla::db1::detail::Schema& schema,
+                                    const tekla::db1::detail::TableSchema& table, bool final) {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
+                                                  std::byte{0x00}};
+  append_u32(bytes, table.tuple_size);
+  append_u32(bytes, table.descriptor_count);
+  for (const auto descriptor : schema.table_descriptors(table)) append_u32(bytes, descriptor);
+
+  std::uint32_t row_number = 0U;
+  const auto append_tuple = [&](const auto& write) {
+    bytes.push_back(std::byte{0});
+    const auto tuple_offset = bytes.size();
+    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+    write(tuple);
+    append_u32(bytes, 30'000U + row_number);
+    append_u32(bytes, 40'000U + row_number);
+    ++row_number;
+  };
+  const auto write_scalar = [](std::span<std::byte> tuple,
+                               const tekla::db1::detail::FieldSchema& field, double value) {
+    if (field.type == tekla::db1::detail::FieldType::f32) {
+      write_u32(tuple, field.offset, std::bit_cast<std::uint32_t>(static_cast<float>(value)));
+    } else {
+      write_f64(tuple, field.offset, value);
+    }
+  };
+
+  if (table.name == "object") {
+    const auto append_object = [&](std::uint32_t id, std::uint32_t type, std::uint32_t subtype,
+                                   std::uint8_t guid_seed) {
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "type") write_u32(tuple, field.offset, type);
+          if (field.name == "subtype") write_u32(tuple, field.offset, subtype);
+          if (field.name == "guid") {
+            for (std::size_t index = 0; index < field.size; ++index) {
+              tuple[field.offset + index] =
+                  static_cast<std::byte>(guid_seed + static_cast<std::uint8_t>(index));
+            }
+          }
+        }
+      });
+    };
+    append_object(1201U, 3U, 0U, 0x20U);
+    append_object(1301U, 73U, 3U, 0x60U);
+  } else if (table.name == "coordsys_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 901U);
+        if (field.name == "xdir_y" || field.name == "ydir_x") write_scalar(tuple, field, 1.0);
+      }
+    });
+  } else if (table.name == "coordsys") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1201U);
+        if (field.name == "csys_attr_id") write_u32(tuple, field.offset, 901U);
+        if (field.name == "z1") write_scalar(tuple, field, -15.0);
+        if (field.name == "length") write_scalar(tuple, field, 1010.0);
+      }
+    });
+  } else if (table.name == "part_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 999U);
+        if (field.name == "prof") write_fixed(tuple, field.offset, field.size, "200*10");
+      }
+    });
+  } else if (table.name == "point") {
+    const auto append_point = [&](std::uint32_t id, double x) {
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "x") write_scalar(tuple, field, x);
+        }
+      });
+    };
+    append_point(920U, 0.0);
+    append_point(921U, 250.0);
+  } else if (table.name == "positioning") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 905U);
+        if (field.name == "PositionAtDepth") write_u32(tuple, field.offset, 2U);
+      }
+    });
+  } else if (table.name == "surfacing") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1301U);
+        if (field.name == "attr_id") write_u32(tuple, field.offset, 903U);
+        if (field.name == "PositioningAttrId") write_u32(tuple, field.offset, 905U);
+        if (field.name == "p1") write_u32(tuple, field.offset, 920U);
+        if (field.name == "p2") write_u32(tuple, field.offset, 921U);
+        if (field.name == "polygon_id") write_u32(tuple, field.offset, 950U);
+      }
+    });
+  } else if (table.name == "surfacing_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 903U);
+        if (field.name == "npoints") write_u32(tuple, field.offset, 4U);
+        if (field.name == "ryhma") write_fixed(tuple, field.offset, field.size, "0");
+        if (field.name == "ben") write_fixed(tuple, field.offset, field.size, "SURFACE-GRATING");
+        if (field.name == "Geometry") write_fixed(tuple, field.offset, field.size, "1.000000");
+        if (field.name == "mat") write_fixed(tuple, field.offset, field.size, "Zero_Density");
+        if (field.name == "finish") write_fixed(tuple, field.offset, field.size, "TS8 - Open-Mesh");
+        if (field.name == "surfacing_type") write_u32(tuple, field.offset, 3U);
+        if (field.name == "father_cuts") write_u32(tuple, field.offset, 1U);
+      }
+    });
+  } else if (table.name == "partpolygon") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      constexpr std::array<double, 4> x{0.0, 250.0, 250.0, 0.0};
+      constexpr std::array<double, 4> y{0.0, 0.0, 1010.0, 1010.0};
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 950U);
+        if (field.name == "hash_id") write_u32(tuple, field.offset, 951U);
+        for (std::size_t index = 0U; index < 10U; ++index) {
+          const auto suffix = std::to_string(index + 1U);
+          if (index < x.size() && field.name == "x" + suffix) write_scalar(tuple, field, x[index]);
+          if (index < y.size() && field.name == "y" + suffix) write_scalar(tuple, field, y[index]);
+          if (field.name == "types" + suffix) {
+            write_u32(tuple, field.offset, index < x.size() ? 0U : 2'147'483'647U);
+          }
+        }
+      }
+    });
+  } else if (table.name == "relation") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 960U);
+        if (field.name == "type") write_u32(tuple, field.offset, 73U);
+        if (field.name == "id1") write_u32(tuple, field.offset, 1201U);
+        if (field.name == "id2") write_u32(tuple, field.offset, 1301U);
+      }
+    });
+  }
+
+  bytes.push_back(std::byte{0});
+  if (final) {
+    bytes.insert(bytes.end(), final_footer.begin(), final_footer.end());
+  } else {
+    bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  }
+}
+
+std::vector<std::byte> database_with_surface_treatment() {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::string_view format = "9.66";
+  const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
+  CHECK(schema != nullptr, "the surface-treatment fixture schema is registered");
+  std::vector<std::byte> bytes;
+  append_ascii(bytes, "Xsteel");
+  bytes.push_back(std::byte{0x85});
+  bytes.push_back(std::byte{' '});
+  bytes.insert(bytes.end(), reinterpret_cast<const std::byte*>(format.data()),
+               reinterpret_cast<const std::byte*>(format.data() + format.size()));
+  append_ascii(bytes, " 7d72d8c9-0250-4f3a-8760-bcef517f016e");
+  append_u32(bytes, 1U);
+  bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  if (schema != nullptr) {
+    for (std::size_t index = 0U; index < schema->tables.size(); ++index) {
+      append_surface_treatment_table(bytes, *schema, schema->tables[index],
+                                     index + 1U == schema->tables.size());
+    }
+  }
+  return bytes;
+}
+
+void append_pour_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schema& schema,
+                       const tekla::db1::detail::TableSchema& table, bool final) {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
+                                                  std::byte{0x00}};
+  append_u32(bytes, table.tuple_size);
+  append_u32(bytes, table.descriptor_count);
+  for (const auto descriptor : schema.table_descriptors(table)) append_u32(bytes, descriptor);
+
+  std::uint32_t row_number = 0U;
+  const auto append_tuple = [&](const auto& write) {
+    bytes.push_back(std::byte{0});
+    const auto tuple_offset = bytes.size();
+    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+    write(tuple);
+    append_u32(bytes, 50'000U + row_number);
+    append_u32(bytes, 60'000U + row_number);
+    ++row_number;
+  };
+
+  if (table.name == "object") {
+    const auto append_object = [&](std::uint32_t id, std::uint32_t type, std::uint32_t subtype,
+                                   std::uint8_t guid_seed) {
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "type") write_u32(tuple, field.offset, type);
+          if (field.name == "subtype") write_u32(tuple, field.offset, subtype);
+          if (field.name == "guid") {
+            for (std::size_t index = 0; index < field.size; ++index) {
+              tuple[field.offset + index] =
+                  static_cast<std::byte>(guid_seed + static_cast<std::uint8_t>(index));
+            }
+          }
+        }
+      });
+    };
+    append_object(1401U, 90U, 0U, 0x30U);
+    append_object(1402U, 101U, 0U, 0x50U);
+    append_object(1403U, 90U, 1U, 0x70U);
+  } else if (table.name == "pour_object") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1401U);
+        if (field.name == "obj_class") write_u32(tuple, field.offset, 7U);
+        if (field.name == "pour_phase") write_u32(tuple, field.offset, 12U);
+        if (field.name == "pour_unit_id") write_u32(tuple, field.offset, 1402U);
+        if (field.name == "pour_number") write_fixed(tuple, field.offset, field.size, "POUR-42");
+        if (field.name == "pour_type") write_fixed(tuple, field.offset, field.size, "Bridge deck");
+        if (field.name == "concrete_mixture")
+          write_fixed(tuple, field.offset, field.size, "C35/45");
+      }
+    });
+  } else if (table.name == "pour_unit") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1402U);
+        if (field.name == "pour_id") write_u32(tuple, field.offset, 1401U);
+        if (field.name == "name") write_fixed(tuple, field.offset, field.size, "Deck pour unit");
+      }
+    });
+  }
+
+  bytes.push_back(std::byte{0});
+  bytes.insert(bytes.end(), final ? final_footer.begin() : table_end.begin(),
+               final ? final_footer.end() : table_end.end());
+}
+
+std::vector<std::byte> database_with_pour_objects() {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::string_view format = "9.66";
+  const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
+  CHECK(schema != nullptr, "the pour fixture schema is registered");
+  std::vector<std::byte> bytes;
+  append_ascii(bytes, "Xsteel");
+  bytes.push_back(std::byte{0x85});
+  bytes.push_back(std::byte{' '});
+  bytes.insert(bytes.end(), reinterpret_cast<const std::byte*>(format.data()),
+               reinterpret_cast<const std::byte*>(format.data() + format.size()));
+  append_ascii(bytes, " 7d72d8c9-0250-4f3a-8760-bcef517f016e");
+  append_u32(bytes, 1U);
+  bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  if (schema != nullptr) {
+    for (std::size_t index = 0U; index < schema->tables.size(); ++index) {
+      append_pour_table(bytes, *schema, schema->tables[index], index + 1U == schema->tables.size());
+    }
+  }
+  return bytes;
+}
+
+void append_rebar_splice_table(std::vector<std::byte>& bytes,
+                               const tekla::db1::detail::Schema& schema,
+                               const tekla::db1::detail::TableSchema& table, bool final) {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
+                                                  std::byte{0x00}};
+  append_u32(bytes, table.tuple_size);
+  append_u32(bytes, table.descriptor_count);
+  for (const auto descriptor : schema.table_descriptors(table)) append_u32(bytes, descriptor);
+
+  std::uint32_t row_number = 0U;
+  const auto append_tuple = [&](const auto& write) {
+    bytes.push_back(std::byte{0});
+    const auto tuple_offset = bytes.size();
+    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+    write(tuple);
+    append_u32(bytes, 70'000U + row_number);
+    append_u32(bytes, 80'000U + row_number);
+    ++row_number;
+  };
+
+  if (table.name == "object") {
+    const auto append_object = [&](std::uint32_t id, std::uint32_t type, std::uint32_t subtype,
+                                   std::uint8_t guid_seed) {
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "type") write_u32(tuple, field.offset, type);
+          if (field.name == "subtype") write_u32(tuple, field.offset, subtype);
+          if (field.name == "guid") {
+            for (std::size_t index = 0; index < field.size; ++index) {
+              tuple[field.offset + index] =
+                  static_cast<std::byte>(guid_seed + static_cast<std::uint8_t>(index));
+            }
+          }
+        }
+      });
+    };
+    append_object(1501U, 74U, 0U, 0x20U);
+    append_object(1502U, 16U, 1U, 0x40U);
+    append_object(1503U, 16U, 1U, 0x60U);
+  } else if (table.name == "rebar_splice") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1501U);
+        if (field.name == "rebarid1") write_u32(tuple, field.offset, 1502U);
+        if (field.name == "rebarid2") write_u32(tuple, field.offset, 1503U);
+        if (field.name == "end1") write_u32(tuple, field.offset, 1U);
+        if (field.name == "end2") write_u32(tuple, field.offset, 0U);
+        if (field.name == "type") write_u32(tuple, field.offset, 2U);
+        if (field.name == "laplength") write_f64(tuple, field.offset, 600.0);
+        if (field.name == "offset") write_f64(tuple, field.offset, 12.5);
+        if (field.name == "clearance") write_f64(tuple, field.offset, 8.0);
+        if (field.name == "position") write_u32(tuple, field.offset, 1U);
+      }
+    });
+  }
+
+  bytes.push_back(std::byte{0});
+  bytes.insert(bytes.end(), final ? final_footer.begin() : table_end.begin(),
+               final ? final_footer.end() : table_end.end());
+}
+
+std::vector<std::byte> database_with_rebar_splice() {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::string_view format = "9.66";
+  const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
+  CHECK(schema != nullptr, "the rebar-splice fixture schema is registered");
+  std::vector<std::byte> bytes;
+  append_ascii(bytes, "Xsteel");
+  bytes.push_back(std::byte{0x85});
+  bytes.push_back(std::byte{' '});
+  bytes.insert(bytes.end(), reinterpret_cast<const std::byte*>(format.data()),
+               reinterpret_cast<const std::byte*>(format.data() + format.size()));
+  append_ascii(bytes, " 7d72d8c9-0250-4f3a-8760-bcef517f016e");
+  append_u32(bytes, 1U);
+  bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  if (schema != nullptr) {
+    for (std::size_t index = 0U; index < schema->tables.size(); ++index) {
+      append_rebar_splice_table(bytes, *schema, schema->tables[index],
+                                index + 1U == schema->tables.size());
+    }
+  }
+  return bytes;
+}
+
+void append_surface_object_table(std::vector<std::byte>& bytes,
+                                 const tekla::db1::detail::Schema& schema,
+                                 const tekla::db1::detail::TableSchema& table, bool final) {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
+                                                  std::byte{0x00}};
+  append_u32(bytes, table.tuple_size);
+  append_u32(bytes, table.descriptor_count);
+  for (const auto descriptor : schema.table_descriptors(table)) append_u32(bytes, descriptor);
+
+  std::uint32_t row_number = 0U;
+  const auto append_tuple = [&](const auto& write) {
+    bytes.push_back(std::byte{0});
+    const auto tuple_offset = bytes.size();
+    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+    write(tuple);
+    append_u32(bytes, 90'000U + row_number);
+    append_u32(bytes, 100'000U + row_number);
+    ++row_number;
+  };
+
+  if (table.name == "object") {
+    const auto append_object = [&](std::uint32_t id, std::uint32_t type, std::uint32_t subtype,
+                                   std::uint8_t guid_seed) {
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "type") write_u32(tuple, field.offset, type);
+          if (field.name == "subtype") write_u32(tuple, field.offset, subtype);
+          if (field.name == "guid") {
+            for (std::size_t index = 0; index < field.size; ++index) {
+              tuple[field.offset + index] =
+                  static_cast<std::byte>(guid_seed + static_cast<std::uint8_t>(index));
+            }
+          }
+        }
+      });
+    };
+    append_object(1601U, 97U, 1U, 0x10U);
+    append_object(1602U, 2U, 0U, 0x30U);
+  } else if (table.name == "surface_object") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1601U);
+        if (field.name == "obj_class") write_u32(tuple, field.offset, 60U);
+        if (field.name == "name")
+          write_fixed(tuple, field.offset, field.size, "Rebar set leg surface");
+        if (field.name == "group") write_fixed(tuple, field.offset, field.size, "4");
+        if (field.name == "related_part_id") write_u32(tuple, field.offset, 1602U);
+        if (field.name == "geometry_type") write_u32(tuple, field.offset, 2U);
+        if (field.name == "created_from_pour") write_u32(tuple, field.offset, 0U);
+        if (field.name == "length_direction_x") write_f64(tuple, field.offset, 1.0);
+        if (field.name == "length_direction_y") write_f64(tuple, field.offset, 0.0);
+        if (field.name == "length_direction_z") write_f64(tuple, field.offset, 0.0);
+        if (field.name == "layer_number") write_u32(tuple, field.offset, 2U);
+        if (field.name == "offset") write_f64(tuple, field.offset, 12.5);
+        if (field.name == "offset_type") write_u32(tuple, field.offset, 1U);
+        if (field.name == "surface_type")
+          write_fixed(tuple, field.offset, field.size, "Rebar set leg surface");
+      }
+    });
+  }
+
+  bytes.push_back(std::byte{0});
+  bytes.insert(bytes.end(), final ? final_footer.begin() : table_end.begin(),
+               final ? final_footer.end() : table_end.end());
+}
+
+std::vector<std::byte> database_with_surface_object() {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::string_view format = "9.66";
+  const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
+  CHECK(schema != nullptr, "the surface-object fixture schema is registered");
+  std::vector<std::byte> bytes;
+  append_ascii(bytes, "Xsteel");
+  bytes.push_back(std::byte{0x85});
+  bytes.push_back(std::byte{' '});
+  bytes.insert(bytes.end(), reinterpret_cast<const std::byte*>(format.data()),
+               reinterpret_cast<const std::byte*>(format.data() + format.size()));
+  append_ascii(bytes, " 7d72d8c9-0250-4f3a-8760-bcef517f016e");
+  append_u32(bytes, 1U);
+  bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  if (schema != nullptr) {
+    for (std::size_t index = 0U; index < schema->tables.size(); ++index) {
+      append_surface_object_table(bytes, *schema, schema->tables[index],
+                                  index + 1U == schema->tables.size());
+    }
+  }
+  return bytes;
+}
+
+void append_rebar_set_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schema& schema,
+                            const tekla::db1::detail::TableSchema& table, bool final) {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
+                                                  std::byte{0x00}};
+  append_u32(bytes, table.tuple_size);
+  append_u32(bytes, table.descriptor_count);
+  for (const auto descriptor : schema.table_descriptors(table)) append_u32(bytes, descriptor);
+
+  std::uint32_t row_number = 0U;
+  const auto append_tuple = [&](const auto& write) {
+    bytes.push_back(std::byte{0});
+    const auto tuple_offset = bytes.size();
+    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+    write(tuple);
+    append_u32(bytes, 110'000U + row_number);
+    append_u32(bytes, 120'000U + row_number);
+    ++row_number;
+  };
+
+  if (table.name == "object") {
+    const auto append_object = [&](std::uint32_t id, std::uint32_t type, std::uint32_t subtype,
+                                   std::uint8_t guid_seed) {
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "type") write_u32(tuple, field.offset, type);
+          if (field.name == "subtype") write_u32(tuple, field.offset, subtype);
+          if (field.name == "guid") {
+            for (std::size_t index = 0; index < field.size; ++index) {
+              tuple[field.offset + index] =
+                  static_cast<std::byte>(guid_seed + static_cast<std::uint8_t>(index));
+            }
+          }
+        }
+      });
+    };
+    append_object(1701U, 47U, 9U, 0x10U);
+    append_object(1702U, 10247U, 0U, 0x30U);
+    append_object(1703U, 96U, 1U, 0x50U);
+    append_object(1704U, 96U, 3U, 0x70U);
+  } else if (table.name == "string") {
+    const auto append_string = [&](std::uint32_t id, std::string_view value) {
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "string") write_fixed(tuple, field.offset, field.size, value);
+        }
+      });
+    };
+    append_string(1801U, "REBAR");
+    append_string(1802U, "B500B");
+    append_string(1803U, "12");
+    append_string(1804U, "Uncoated");
+  } else if (table.name == "rebarset") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1701U);
+        if (field.name == "prop_id") write_u32(tuple, field.offset, 1901U);
+        if (field.name == "layer_order_number") write_u32(tuple, field.offset, 2U);
+        if (field.name == "orientation_id") write_u32(tuple, field.offset, 1902U);
+        if (field.name == "flags") write_u32(tuple, field.offset, 3U);
+      }
+    });
+  } else if (table.name == "rebarset_prop") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1901U);
+        if (field.name == "bar_class") write_u32(tuple, field.offset, 4U);
+        if (field.name == "name_id") write_u32(tuple, field.offset, 1801U);
+        if (field.name == "grade_id") write_u32(tuple, field.offset, 1802U);
+        if (field.name == "size_id") write_u32(tuple, field.offset, 1803U);
+        if (field.name == "finish_id") write_u32(tuple, field.offset, 1804U);
+        if (field.name == "bending_radius") write_f64(tuple, field.offset, 30.0);
+        if (field.name == "start_number") write_u32(tuple, field.offset, 1U);
+        if (field.name == "prefix") write_fixed(tuple, field.offset, field.size, "RS");
+      }
+    });
+  } else if (table.name == "rebarset_group") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1702U);
+      }
+    });
+  } else if (table.name == "rebarset_end_detail_strip") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1703U);
+        if (field.name == "end_type") write_u32(tuple, field.offset, 1U);
+        if (field.name == "hook_type") write_u32(tuple, field.offset, 2U);
+        if (field.name == "thread_type") write_u32(tuple, field.offset, 3U);
+        if (field.name == "crank_type") write_u32(tuple, field.offset, 4U);
+        if (field.name == "crank_length_type") write_u32(tuple, field.offset, 5U);
+        if (field.name == "end_offset") write_f64(tuple, field.offset, 25.0);
+        if (field.name == "end_offset_type") write_u32(tuple, field.offset, 6U);
+        if (field.name == "bars_affected") write_u32(tuple, field.offset, 7U);
+        if (field.name == "first_affected") write_u32(tuple, field.offset, 8U);
+        if (field.name == "follows_edges") write_u32(tuple, field.offset, 1U);
+        if (field.name == "apply_order_number") write_u32(tuple, field.offset, 9U);
+        if (field.name == "flags") write_u32(tuple, field.offset, 10U);
+      }
+    });
+  } else if (table.name == "rebarset_splitter") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1704U);
+        if (field.name == "attr_id") write_u32(tuple, field.offset, 1903U);
+        if (field.name == "apply_order_number") write_u32(tuple, field.offset, 11U);
+      }
+    });
+  } else if (table.name == "rebarset_splitter_attr") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1903U);
+        if (field.name == "lap_length") write_f64(tuple, field.offset, 450.0);
+        if (field.name == "bars_affected") write_u32(tuple, field.offset, 1U);
+        if (field.name == "first_affected") write_u32(tuple, field.offset, 2U);
+        if (field.name == "follows_edges") write_u32(tuple, field.offset, 1U);
+        if (field.name == "stagger_type") write_u32(tuple, field.offset, 3U);
+        if (field.name == "stagger_offset") write_f64(tuple, field.offset, 120.0);
+        if (field.name == "lap_side") write_u32(tuple, field.offset, 2U);
+        if (field.name == "split_offset") write_f64(tuple, field.offset, 15.0);
+        if (field.name == "lap_offset_dir") write_u32(tuple, field.offset, 4U);
+        if (field.name == "splicing_type") write_u32(tuple, field.offset, 5U);
+        if (field.name == "crank_side") write_u32(tuple, field.offset, 6U);
+        if (field.name == "crank_length_type") write_u32(tuple, field.offset, 7U);
+        if (field.name == "crank_id") write_u32(tuple, field.offset, 1904U);
+      }
+    });
+  } else if (table.name == "relation") {
+    const auto append_relation = [&](std::uint32_t id, std::uint32_t type, std::uint32_t source,
+                                     std::uint32_t target) {
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "type") write_u32(tuple, field.offset, type);
+          if (field.name == "id1") write_u32(tuple, field.offset, source);
+          if (field.name == "id2") write_u32(tuple, field.offset, target);
+        }
+      });
+    };
+    append_relation(2001U, 60005U, 1701U, 1702U);
+    append_relation(2002U, 96U, 1701U, 1703U);
+    append_relation(2003U, 96U, 1701U, 1704U);
+  }
+
+  bytes.push_back(std::byte{0});
+  bytes.insert(bytes.end(), final ? final_footer.begin() : table_end.begin(),
+               final ? final_footer.end() : table_end.end());
+}
+
+std::vector<std::byte> database_with_rebar_set() {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::string_view format = "9.66";
+  const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
+  CHECK(schema != nullptr, "the rebar-set fixture schema is registered");
+  std::vector<std::byte> bytes;
+  append_ascii(bytes, "Xsteel");
+  bytes.push_back(std::byte{0x85});
+  bytes.push_back(std::byte{' '});
+  bytes.insert(bytes.end(), reinterpret_cast<const std::byte*>(format.data()),
+               reinterpret_cast<const std::byte*>(format.data() + format.size()));
+  append_ascii(bytes, " 7d72d8c9-0250-4f3a-8760-bcef517f016e");
+  append_u32(bytes, 1U);
+  bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  if (schema != nullptr) {
+    for (std::size_t index = 0U; index < schema->tables.size(); ++index) {
+      append_rebar_set_table(bytes, *schema, schema->tables[index],
+                             index + 1U == schema->tables.size());
     }
   }
   return bytes;
@@ -850,6 +1777,18 @@ std::vector<std::byte> database_with_relationship_semantics(std::string_view for
   return database_with_one_object("200*10", "14", format, false, 7U, false, false, false, false,
                                   false, false, false, false, false, false, false, false, false,
                                   false, true);
+}
+
+std::vector<std::byte> database_with_skewed_part_frame() {
+  return database_with_one_object("200*10", "14", "9.66", false, 7U, false, false, false, false,
+                                  false, false, false, false, false, false, false, false, false,
+                                  false, false, PartFrameFixture::skewed);
+}
+
+std::vector<std::byte> database_with_rotated_part_frame() {
+  return database_with_one_object("200*10", "14", "9.66", false, 7U, false, false, false, false,
+                                  false, false, false, false, false, false, false, false, false,
+                                  false, false, PartFrameFixture::rotated);
 }
 
 std::vector<std::byte> database_with_report_semantics(std::string_view format) {
@@ -1185,7 +2124,8 @@ void append_boolean_chain_table(std::vector<std::byte>& bytes,
                                 const tekla::db1::detail::Schema& schema,
                                 const tekla::db1::detail::TableSchema& table, bool final,
                                 std::size_t part_count, bool cycle, bool shared,
-                                bool boolean_part_operands, bool swept_root) {
+                                bool boolean_part_operands, bool swept_root,
+                                bool additive_operand) {
   constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
                                                std::byte{0xdb}};
   constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
@@ -1236,7 +2176,7 @@ void append_boolean_chain_table(std::vector<std::byte>& bytes,
       append_tuple([&](std::span<std::byte> tuple) {
         for (const auto& field : schema.table_fields(table)) {
           if (field.name == "id") write_u32(tuple, field.offset, 800U + id_offset);
-          if (field.name == "type") write_u32(tuple, field.offset, 11U);
+          if (field.name == "type") write_u32(tuple, field.offset, additive_operand ? 38U : 11U);
           if (field.name == "id1") {
             write_u32(tuple, field.offset, shared ? shared_relations[index][0] : 1201U + id_offset);
           }
@@ -1266,7 +2206,9 @@ void append_boolean_chain_table(std::vector<std::byte>& bytes,
           if (field.name == "id") write_u32(tuple, field.offset, 1201U + id_offset);
           if (field.name == "part_attr_id") {
             write_u32(tuple, field.offset,
-                      (boolean_part_operands || swept_root) && index > 0U ? 902U : 900U);
+                      (boolean_part_operands || swept_root || additive_operand) && index > 0U
+                          ? 902U
+                          : 900U);
           }
           if (field.name == "csys_attr_id") write_u32(tuple, field.offset, 901U);
           if (field.name == "p1")
@@ -1276,7 +2218,9 @@ void append_boolean_chain_table(std::vector<std::byte>& bytes,
           }
           if (field.name == "csys_x") {
             write_f64(tuple, field.offset,
-                      shared && index < 2U ? 10.0 : 10.0 + 100.0 * static_cast<double>(index));
+                      additive_operand && index > 0U ? 910.0
+                      : shared && index < 2U         ? 10.0
+                                                     : 10.0 + 100.0 * static_cast<double>(index));
           }
           if (field.name == "csys_y") write_f64(tuple, field.offset, 20.0);
           if (field.name == "csys_z") write_f64(tuple, field.offset, 30.0);
@@ -1295,15 +2239,18 @@ void append_boolean_chain_table(std::vector<std::byte>& bytes,
           if (field.name == "obj_type") write_u32(tuple, field.offset, object_type);
           if (field.name == "ben") write_fixed(tuple, field.offset, field.size, "Boolean fixture");
           if (field.name == "prof" || field.name == "Geometry") {
-            write_fixed(tuple, field.offset, field.size, polybeam ? "D32" : "200*200");
+            write_fixed(tuple, field.offset, field.size,
+                        polybeam                         ? "D32"
+                        : additive_operand && id == 902U ? "O200*20"
+                                                         : "200*200");
           }
           if (field.name == "mat") write_fixed(tuple, field.offset, field.size, "S355");
         }
       });
     };
     append_attribute(900U, 2U, swept_root);
-    if (boolean_part_operands || swept_root) {
-      append_attribute(902U, boolean_part_operands ? 11U : 2U, false);
+    if (boolean_part_operands || swept_root || additive_operand) {
+      append_attribute(902U, additive_operand ? 38U : boolean_part_operands ? 11U : 2U, false);
     }
   } else if (table.name == "coordsys_attr") {
     append_tuple([&](std::span<std::byte> tuple) {
@@ -1323,7 +2270,8 @@ void append_boolean_chain_table(std::vector<std::byte>& bytes,
 std::vector<std::byte> database_with_boolean_chain(std::size_t part_count, bool cycle = false,
                                                    bool shared = false,
                                                    bool boolean_part_operands = false,
-                                                   bool swept_root = false) {
+                                                   bool swept_root = false,
+                                                   bool additive_operand = false) {
   constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
                                                std::byte{0xdb}};
   const auto* schema = tekla::db1::detail::schema_for("9.66", 0x85);
@@ -1338,7 +2286,7 @@ std::vector<std::byte> database_with_boolean_chain(std::size_t part_count, bool 
     for (std::size_t index = 0; index < schema->tables.size(); ++index) {
       append_boolean_chain_table(bytes, *schema, schema->tables[index],
                                  index + 1U == schema->tables.size(), part_count, cycle, shared,
-                                 boolean_part_operands, swept_root);
+                                 boolean_part_operands, swept_root, additive_operand);
     }
   }
   return bytes;
@@ -1388,10 +2336,41 @@ std::vector<std::uint64_t> display_signature(const tekla::db1::Model& model) {
   return signature;
 }
 
+bool reconstructs_model_mesh(const tekla::db1::MeshView& local_mesh,
+                             const tekla::db1::MeshView& model_mesh) {
+  if (local_mesh.positions.size() != model_mesh.positions.size() ||
+      local_mesh.indices.size() != model_mesh.indices.size() ||
+      !std::equal(local_mesh.indices.begin(), local_mesh.indices.end(), model_mesh.indices.begin(),
+                  model_mesh.indices.end())) {
+    return false;
+  }
+  for (std::size_t index = 0U; index + 2U < local_mesh.positions.size(); index += 3U) {
+    const auto& placement = local_mesh.placement;
+    const tekla::db1::Vector3d reconstructed{
+        placement.origin.x + placement.x_axis.x * local_mesh.positions[index] +
+            placement.y_axis.x * local_mesh.positions[index + 1U] +
+            placement.z_axis.x * local_mesh.positions[index + 2U],
+        placement.origin.y + placement.x_axis.y * local_mesh.positions[index] +
+            placement.y_axis.y * local_mesh.positions[index + 1U] +
+            placement.z_axis.y * local_mesh.positions[index + 2U],
+        placement.origin.z + placement.x_axis.z * local_mesh.positions[index] +
+            placement.y_axis.z * local_mesh.positions[index + 1U] +
+            placement.z_axis.z * local_mesh.positions[index + 2U]};
+    if (std::abs(reconstructed.x - model_mesh.positions[index]) >= 1.0e-6 ||
+        std::abs(reconstructed.y - model_mesh.positions[index + 1U]) >= 1.0e-6 ||
+        std::abs(reconstructed.z - model_mesh.positions[index + 2U]) >= 1.0e-6) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
   using namespace tekla::db1;
+  CHECK(ProcessRequest{}.mesh_coordinate_mode == MeshCoordinateMode::model_space,
+        "display meshes remain in model space unless local placement is requested");
   CHECK(object_role(ObjectKind::beam) == ObjectRole::model_element,
         "ordinary parts are independently publishable model elements");
   CHECK(object_role(ObjectKind::component) == ObjectRole::model_element,
@@ -1446,12 +2425,900 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     CHECK(processed.has_value(), "workshop-weld identity processing is available");
     if (processed) {
       auto batch = processed.value()->next();
-      CHECK(batch.has_value() && batch.value().kind == BatchKind::objects &&
-                batch.value().objects.size() == 1U &&
-                batch.value().objects.front().kind == ObjectKind::weld &&
-                batch.value().objects.front().weld_location == WeldLocation::workshop,
-            "a welding common-attribute reference exposes workshop weld semantics");
+      bool saw_workshop = false;
+      bool saw_site = false;
+      if (batch && batch.value().kind == BatchKind::objects) {
+        for (const auto& object : batch.value().objects) {
+          saw_workshop |= object.internal_id == 1201U && object.kind == ObjectKind::weld &&
+                          object.weld_location == WeldLocation::workshop;
+          saw_site |= object.internal_id == 1202U && object.kind == ObjectKind::weld &&
+                      object.weld_location == WeldLocation::site;
+        }
+      }
+      CHECK(saw_workshop && saw_site,
+            "welding common-attribute references distinguish workshop and site welds");
     }
+
+    ProcessRequest property_request;
+    property_request.stages = Stage::properties;
+    property_request.batch_memory_budget_bytes = sizeof(PropertyView) * 11U;
+    auto properties = weld_model.value().process(property_request);
+    CHECK(properties.has_value(), "weld property processing is available without part rows");
+    bool saw_shop = false;
+    bool saw_around = false;
+    bool saw_compound = false;
+    bool saw_logical = false;
+    bool saw_intermittent_type = false;
+    bool saw_size_above = false;
+    bool saw_type_above = false;
+    bool saw_intermittent_above = false;
+    bool saw_size_below = false;
+    bool saw_type_below = false;
+    bool saw_intermittent_below = false;
+    if (properties) {
+      while (true) {
+        auto batch = properties.value()->next();
+        CHECK(batch.has_value(), "weld property batches decode without an error");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        if (batch.value().kind != BatchKind::properties) continue;
+        std::unordered_set<std::uint64_t> batch_welds;
+        for (const auto& property : batch.value().properties) {
+          if (property.group == "Tekla" && property.name.starts_with("weld")) {
+            batch_welds.insert(property.object_id);
+          }
+          if (property.object_id != 1201U || property.group != "Tekla") {
+            continue;
+          }
+          saw_shop |= property.name == "weldShop" && property.kind == PropertyValueKind::integer &&
+                      property.integer_value == 1;
+          saw_around |= property.name == "weldAround" &&
+                        property.kind == PropertyValueKind::integer && property.integer_value == 1;
+          saw_compound |= property.name == "weldCompound" &&
+                          property.kind == PropertyValueKind::integer &&
+                          property.integer_value == 1;
+          saw_logical |= property.name == "weldLogical" &&
+                         property.kind == PropertyValueKind::integer && property.integer_value == 0;
+          saw_intermittent_type |= property.name == "weldIntermittentType" &&
+                                   property.kind == PropertyValueKind::integer &&
+                                   property.integer_value == 2;
+          saw_size_above |= property.name == "weldSizeAbove" &&
+                            property.kind == PropertyValueKind::floating &&
+                            property.floating_value == 5.0;
+          saw_type_above |= property.name == "weldTypeAbove" &&
+                            property.kind == PropertyValueKind::integer &&
+                            property.integer_value == 10;
+          saw_intermittent_above |= property.name == "weldIntermittentAbove" &&
+                                    property.kind == PropertyValueKind::integer &&
+                                    property.integer_value == 1;
+          saw_size_below |= property.name == "weldSizeBelow" &&
+                            property.kind == PropertyValueKind::floating &&
+                            property.floating_value == 3.0;
+          saw_type_below |= property.name == "weldTypeBelow" &&
+                            property.kind == PropertyValueKind::integer &&
+                            property.integer_value == 6;
+          saw_intermittent_below |= property.name == "weldIntermittentBelow" &&
+                                    property.kind == PropertyValueKind::integer &&
+                                    property.integer_value == 0;
+        }
+        CHECK(batch_welds.size() <= 1U,
+              "a one-occurrence weld property budget bounds each reusable output batch");
+      }
+    }
+    CHECK(saw_shop && saw_around && saw_compound && saw_logical && saw_intermittent_type,
+          "persisted common weld semantics are ordinary Tekla properties");
+    CHECK(saw_size_above && saw_type_above && saw_intermittent_above && saw_size_below &&
+              saw_type_below && saw_intermittent_below,
+          "linked weld seams expose native above/below size, type, and intermittent values");
+  }
+
+  const auto polygon_weld_bytes = database_with_polygon_weld_geometry();
+  ModelPackage polygon_weld_package;
+  polygon_weld_package.add(
+      Asset::copy(AssetRole::model_database, "polygon-weld.db1", polygon_weld_bytes));
+  auto polygon_weld_model = open(std::move(polygon_weld_package));
+  CHECK(polygon_weld_model.has_value(), "a persisted polygon-weld database opens");
+  if (polygon_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = polygon_weld_model.value().process(request);
+    CHECK(processed.has_value(), "polygon-weld display processing is available");
+    bool saw_weld_mesh = false;
+    bool saw_polygon_record_mesh = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "polygon-weld display batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          saw_polygon_record_mesh = saw_polygon_record_mesh || mesh.object_id == 950U;
+          if (mesh.object_id != 1201U || mesh.positions.empty()) continue;
+          std::array<float, 6> bounds{mesh.positions[0], mesh.positions[1], mesh.positions[2],
+                                      mesh.positions[0], mesh.positions[1], mesh.positions[2]};
+          for (std::size_t index = 3U; index < mesh.positions.size(); index += 3U) {
+            for (std::size_t axis = 0; axis < 3U; ++axis) {
+              bounds[axis] = std::min(bounds[axis], mesh.positions[index + axis]);
+              bounds[axis + 3U] = std::max(bounds[axis + 3U], mesh.positions[index + axis]);
+            }
+          }
+          const bool indices_valid =
+              mesh.indices.size() % 3U == 0U &&
+              std::all_of(mesh.indices.begin(), mesh.indices.end(),
+                          [&](std::uint32_t index) { return index < mesh.positions.size() / 3U; });
+          constexpr std::array<float, 6> expected_bounds{95.0F,  200.0F, 300.0F,
+                                                         100.0F, 210.0F, 305.0F};
+          saw_weld_mesh = mesh.positions.size() == 18U && mesh.indices.size() == 24U &&
+                          indices_valid && bounds == expected_bounds;
+        }
+      }
+    }
+    CHECK(saw_weld_mesh,
+          "a persisted fillet path becomes a bounded triangular mesh on the weld object");
+    CHECK(!saw_polygon_record_mesh,
+          "polygon storage IDs remain internal and do not become display owners");
+  }
+
+  const auto surface_treatment_bytes = database_with_surface_treatment();
+  ModelPackage surface_treatment_package;
+  surface_treatment_package.add(
+      Asset::copy(AssetRole::model_database, "surface-treatment.db1", surface_treatment_bytes));
+  auto surface_treatment_model = open(std::move(surface_treatment_package));
+  CHECK(surface_treatment_model.has_value(), "a persisted surface-treatment database opens");
+  if (surface_treatment_model) {
+    ProcessRequest request;
+    request.stages =
+        Stage::identities | Stage::properties | Stage::semantic_relations | Stage::display_geometry;
+    auto processed = surface_treatment_model.value().process(request);
+    CHECK(processed.has_value(), "surface-treatment processing is available");
+    if (!processed)
+      std::printf("surface-treatment process error: %s\n", processed.error().message.c_str());
+    bool saw_identity = false;
+    bool saw_name = false;
+    bool saw_thickness = false;
+    bool saw_material = false;
+    bool saw_father = false;
+    bool saw_mesh = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "surface-treatment batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& object : batch.value().objects) {
+          saw_identity |=
+              object.internal_id == 1301U && object.kind == ObjectKind::surface_treatment;
+        }
+        for (const auto& property : batch.value().properties) {
+          saw_name |= property.object_id == 1301U && property.name == "name" &&
+                      property.text_value == "SURFACE-GRATING";
+          saw_thickness |= property.object_id == 1301U && property.name == "thickness" &&
+                           property.kind == PropertyValueKind::floating &&
+                           property.floating_value == 1.0;
+        }
+        for (const auto& material : batch.value().materials) {
+          saw_material |= material.object_id == 1301U && material.name == "Zero_Density" &&
+                          material.finish == "TS8 - Open-Mesh";
+        }
+        for (const auto& relation : batch.value().semantic_relations) {
+          saw_father |= relation.kind == SemanticRelationKind::subelement &&
+                        relation.source_id == 1201U && relation.target_id == 1301U &&
+                        relation.source_relation_id == 960U;
+        }
+        for (const auto& mesh : batch.value().meshes) {
+          if (mesh.object_id != 1301U || mesh.positions.empty()) continue;
+          std::array<float, 6> bounds{mesh.positions[0], mesh.positions[1], mesh.positions[2],
+                                      mesh.positions[0], mesh.positions[1], mesh.positions[2]};
+          for (std::size_t index = 3U; index < mesh.positions.size(); index += 3U) {
+            for (std::size_t axis = 0U; axis < 3U; ++axis) {
+              bounds[axis] = std::min(bounds[axis], mesh.positions[index + axis]);
+              bounds[axis + 3U] = std::max(bounds[axis + 3U], mesh.positions[index + axis]);
+            }
+          }
+          const bool indices_valid =
+              mesh.indices.size() == 36U &&
+              std::all_of(mesh.indices.begin(), mesh.indices.end(),
+                          [&](std::uint32_t index) { return index < mesh.positions.size() / 3U; });
+          double signed_volume = 0.0;
+          if (indices_valid) {
+            for (std::size_t index = 0U; index < mesh.indices.size(); index += 3U) {
+              const auto point = [&](std::uint32_t vertex, std::size_t axis) {
+                return static_cast<double>(
+                    mesh.positions[static_cast<std::size_t>(vertex) * 3U + axis]);
+              };
+              const auto a = mesh.indices[index];
+              const auto b = mesh.indices[index + 1U];
+              const auto c = mesh.indices[index + 2U];
+              signed_volume +=
+                  (point(a, 0U) * (point(b, 1U) * point(c, 2U) - point(b, 2U) * point(c, 1U)) -
+                   point(a, 1U) * (point(b, 0U) * point(c, 2U) - point(b, 2U) * point(c, 0U)) +
+                   point(a, 2U) * (point(b, 0U) * point(c, 1U) - point(b, 1U) * point(c, 0U))) /
+                  6.0;
+            }
+          }
+          saw_mesh = mesh.positions.size() == 24U && indices_valid &&
+                     std::abs(signed_volume - 252500.0) <= 1.0e-6 &&
+                     bounds == std::array<float, 6>{0.0F, 0.0F, -1.0F, 250.0F, 1010.0F, 0.0F};
+        }
+      }
+    }
+    CHECK(saw_identity, "a persisted type-73 row has a stable surface-treatment identity");
+    CHECK(saw_name && saw_thickness && saw_material,
+          "surface-treatment attributes expose name, thickness, and material semantics");
+    CHECK(saw_father, "the persisted father relation owns the surface treatment");
+    CHECK(saw_mesh, "a tile surface becomes its persisted one-millimetre treatment solid");
+
+    ProcessRequest local_request;
+    local_request.stages = Stage::display_geometry;
+    local_request.mesh_coordinate_mode = MeshCoordinateMode::local_with_rigid_placement;
+    auto local_processed = surface_treatment_model.value().process(local_request);
+    CHECK(local_processed.has_value(), "surface-treatment local-mesh processing is available");
+    bool saw_local_mesh = false;
+    if (local_processed) {
+      while (true) {
+        auto batch = local_processed.value()->next();
+        CHECK(batch.has_value(), "surface-treatment local-mesh batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          if (mesh.object_id != 1301U || mesh.positions.empty()) continue;
+          std::array<float, 6> bounds{mesh.positions[0], mesh.positions[1], mesh.positions[2],
+                                      mesh.positions[0], mesh.positions[1], mesh.positions[2]};
+          for (std::size_t index = 3U; index < mesh.positions.size(); index += 3U) {
+            for (std::size_t axis = 0U; axis < 3U; ++axis) {
+              bounds[axis] = std::min(bounds[axis], mesh.positions[index + axis]);
+              bounds[axis + 3U] = std::max(bounds[axis + 3U], mesh.positions[index + axis]);
+            }
+          }
+          saw_local_mesh =
+              mesh.coordinate_space == MeshCoordinateMode::local_with_rigid_placement &&
+              bounds == std::array<float, 6>{0.0F, 0.0F, -1.0F, 250.0F, 1010.0F, 0.0F} &&
+              mesh.placement.origin.x == 0.0 && mesh.placement.origin.y == 0.0 &&
+              mesh.placement.origin.z == 0.0 && mesh.placement.x_axis.x == 1.0 &&
+              mesh.placement.y_axis.y == 1.0 && mesh.placement.z_axis.z == 1.0;
+        }
+      }
+    }
+    CHECK(saw_local_mesh,
+          "surface treatments expose reusable local geometry with a rigid model placement");
+  }
+
+  const auto pour_bytes = database_with_pour_objects();
+  ModelPackage pour_package;
+  pour_package.add(Asset::copy(AssetRole::model_database, "pours.db1", pour_bytes));
+  auto pour_model = open(std::move(pour_package));
+  CHECK(pour_model.has_value(), "a persisted pour-object database opens");
+  if (pour_model) {
+    ProcessRequest request;
+    request.stages = Stage::identities | Stage::properties | Stage::semantic_relations;
+    auto processed = pour_model.value().process(request);
+    CHECK(processed.has_value(), "pour object and unit processing is available");
+    bool saw_pour_object = false;
+    bool saw_pour_unit = false;
+    bool saw_unrelated_subtype = false;
+    bool saw_number = false;
+    bool saw_type = false;
+    bool saw_mixture = false;
+    bool saw_unit_name = false;
+    bool saw_membership = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "pour batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& object : batch.value().objects) {
+          saw_pour_object |= object.internal_id == 1401U && object.kind == ObjectKind::pour_object;
+          saw_pour_unit |= object.internal_id == 1402U && object.kind == ObjectKind::pour_unit;
+          saw_unrelated_subtype |=
+              object.internal_id == 1403U && object.kind == ObjectKind::unknown;
+        }
+        for (const auto& property : batch.value().properties) {
+          saw_number |= property.object_id == 1401U && property.name == "pourNumber" &&
+                        property.text_value == "POUR-42";
+          saw_type |= property.object_id == 1401U && property.name == "pourType" &&
+                      property.text_value == "Bridge deck";
+          saw_mixture |= property.object_id == 1401U && property.name == "concreteMixture" &&
+                         property.text_value == "C35/45";
+          saw_unit_name |= property.object_id == 1402U && property.name == "name" &&
+                           property.text_value == "Deck pour unit";
+        }
+        for (const auto& relation : batch.value().semantic_relations) {
+          saw_membership |= relation.kind == SemanticRelationKind::in_assembly &&
+                            relation.source_id == 1401U && relation.target_id == 1402U &&
+                            relation.origin == SemanticRelationOrigin::pour_membership;
+        }
+      }
+    }
+    CHECK(saw_pour_object && saw_pour_unit,
+          "persisted type-90 and type-101 rows have stable pour identities");
+    CHECK(saw_unrelated_subtype, "unproven type-90 subtypes remain unclassified");
+    CHECK(saw_number && saw_type && saw_mixture && saw_unit_name,
+          "pour objects and units expose their persisted exchange semantics");
+    CHECK(saw_membership, "a pour object is linked to its persisted pour unit");
+  }
+
+  const auto splice_bytes = database_with_rebar_splice();
+  ModelPackage splice_package;
+  splice_package.add(Asset::copy(AssetRole::model_database, "splice.db1", splice_bytes));
+  auto splice_model = open(std::move(splice_package));
+  CHECK(splice_model.has_value(), "a persisted rebar-splice database opens");
+  if (splice_model) {
+    ProcessRequest request;
+    request.stages = Stage::identities | Stage::properties | Stage::semantic_relations;
+    request.batch_memory_budget_bytes = sizeof(SemanticRelationView);
+    auto processed = splice_model.value().process(request);
+    CHECK(processed.has_value(), "rebar-splice semantic processing is available");
+    bool saw_identity = false;
+    bool saw_type = false;
+    bool saw_lap = false;
+    bool saw_offset = false;
+    bool saw_clearance = false;
+    bool saw_position = false;
+    bool saw_first_end = false;
+    bool saw_second_end = false;
+    bool saw_first_group = false;
+    bool saw_second_group = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "rebar-splice batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& object : batch.value().objects) {
+          saw_identity |= object.internal_id == 1501U && object.kind == ObjectKind::rebar_splice;
+        }
+        for (const auto& property : batch.value().properties) {
+          saw_type |= property.object_id == 1501U && property.name == "spliceType" &&
+                      property.integer_value == 2;
+          saw_lap |= property.object_id == 1501U && property.name == "lapLength" &&
+                     property.floating_value == 600.0;
+          saw_offset |= property.object_id == 1501U && property.name == "offset" &&
+                        property.floating_value == 12.5;
+          saw_clearance |= property.object_id == 1501U && property.name == "clearance" &&
+                           property.floating_value == 8.0;
+          saw_position |= property.object_id == 1501U && property.name == "barPositions" &&
+                          property.integer_value == 1;
+          saw_first_end |= property.object_id == 1501U && property.name == "firstEnd" &&
+                           property.integer_value == 1;
+          saw_second_end |= property.object_id == 1501U && property.name == "secondEnd" &&
+                            property.integer_value == 0;
+        }
+        for (const auto& relation : batch.value().semantic_relations) {
+          saw_first_group |= relation.kind == SemanticRelationKind::connects_to &&
+                             relation.source_id == 1501U && relation.target_id == 1502U &&
+                             relation.ordinal == 0U &&
+                             relation.origin == SemanticRelationOrigin::rebar_splice;
+          saw_second_group |= relation.kind == SemanticRelationKind::connects_to &&
+                              relation.source_id == 1501U && relation.target_id == 1503U &&
+                              relation.ordinal == 1U &&
+                              relation.origin == SemanticRelationOrigin::rebar_splice;
+        }
+      }
+    }
+    CHECK(saw_identity, "persisted type-74 rows have stable rebar-splice identities");
+    CHECK(saw_type && saw_lap && saw_offset && saw_clearance && saw_position && saw_first_end &&
+              saw_second_end,
+          "rebar splices expose their persisted connection semantics");
+    CHECK(saw_first_group && saw_second_group,
+          "a rebar splice connects to both persisted reinforcement endpoints");
+  }
+
+  const auto surface_object_bytes = database_with_surface_object();
+  ModelPackage surface_object_package;
+  surface_object_package.add(
+      Asset::copy(AssetRole::model_database, "surface-object.db1", surface_object_bytes));
+  auto surface_object_model = open(std::move(surface_object_package));
+  CHECK(surface_object_model.has_value(), "a persisted surface-object database opens");
+  if (surface_object_model) {
+    ProcessRequest request;
+    request.stages = Stage::identities | Stage::properties | Stage::semantic_relations;
+    request.batch_memory_budget_bytes = sizeof(PropertyView) * 2U;
+    auto processed = surface_object_model.value().process(request);
+    CHECK(processed.has_value(), "surface-object semantic processing is available");
+    bool saw_identity = false;
+    bool saw_name = false;
+    bool saw_class = false;
+    bool saw_group = false;
+    bool saw_geometry_type = false;
+    bool saw_layer = false;
+    bool saw_offset = false;
+    bool saw_surface_type = false;
+    bool saw_host = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "surface-object batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& object : batch.value().objects) {
+          saw_identity |= object.internal_id == 1601U && object.kind == ObjectKind::surface_object;
+        }
+        for (const auto& property : batch.value().properties) {
+          saw_name |= property.object_id == 1601U && property.name == "name" &&
+                      property.text_value == "Rebar set leg surface";
+          saw_class |= property.object_id == 1601U && property.name == "class" &&
+                       property.integer_value == 60;
+          saw_group |=
+              property.object_id == 1601U && property.name == "group" && property.text_value == "4";
+          saw_geometry_type |= property.object_id == 1601U && property.name == "geometryType" &&
+                               property.integer_value == 2;
+          saw_layer |= property.object_id == 1601U && property.name == "layerNumber" &&
+                       property.integer_value == 2;
+          saw_offset |= property.object_id == 1601U && property.name == "additionalOffset" &&
+                        property.floating_value == 12.5;
+          saw_surface_type |= property.object_id == 1601U && property.name == "surfaceType" &&
+                              property.text_value == "Rebar set leg surface";
+        }
+        for (const auto& relation : batch.value().semantic_relations) {
+          saw_host |= relation.kind == SemanticRelationKind::hosted_on &&
+                      relation.source_id == 1601U && relation.target_id == 1602U &&
+                      relation.origin == SemanticRelationOrigin::surface_object;
+        }
+      }
+    }
+    CHECK(saw_identity, "persisted type-97 rows have stable surface-object identities");
+    CHECK(saw_name && saw_class && saw_group && saw_geometry_type && saw_layer && saw_offset &&
+              saw_surface_type,
+          "surface objects expose their persisted surface semantics");
+    CHECK(saw_host, "a surface object is linked to its persisted host part");
+  }
+
+  const auto rebar_set_bytes = database_with_rebar_set();
+  ModelPackage rebar_set_package;
+  rebar_set_package.add(Asset::copy(AssetRole::model_database, "rebar-set.db1", rebar_set_bytes));
+  auto rebar_set_model = open(std::move(rebar_set_package));
+  CHECK(rebar_set_model.has_value(), "a persisted rebar-set database opens");
+  if (rebar_set_model) {
+    ProcessRequest request;
+    request.stages = Stage::identities | Stage::properties | Stage::semantic_relations;
+    request.batch_memory_budget_bytes = sizeof(PropertyView) * 2U;
+    auto processed = rebar_set_model.value().process(request);
+    CHECK(processed.has_value(), "rebar-set semantic processing is available");
+    bool saw_set = false;
+    bool saw_group = false;
+    bool saw_end_detail = false;
+    bool saw_splitter = false;
+    bool saw_name = false;
+    bool saw_grade = false;
+    bool saw_radius = false;
+    bool saw_end_offset = false;
+    bool saw_lap_length = false;
+    bool saw_stagger = false;
+    bool saw_group_child = false;
+    bool saw_end_child = false;
+    bool saw_splitter_child = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "rebar-set batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& object : batch.value().objects) {
+          saw_set |= object.internal_id == 1701U && object.kind == ObjectKind::rebar_set;
+          saw_group |= object.internal_id == 1702U && object.kind == ObjectKind::rebar_set_group;
+          saw_end_detail |=
+              object.internal_id == 1703U && object.kind == ObjectKind::rebar_end_detail_modifier;
+          saw_splitter |= object.internal_id == 1704U && object.kind == ObjectKind::rebar_splitter;
+        }
+        for (const auto& property : batch.value().properties) {
+          saw_name |= property.object_id == 1701U && property.name == "name" &&
+                      property.text_value == "REBAR";
+          saw_grade |= property.object_id == 1701U && property.name == "grade" &&
+                       property.text_value == "B500B";
+          saw_radius |= property.object_id == 1701U && property.name == "bendingRadius" &&
+                        property.floating_value == 30.0;
+          saw_end_offset |= property.object_id == 1703U && property.name == "endOffset" &&
+                            property.floating_value == 25.0;
+          saw_lap_length |= property.object_id == 1704U && property.name == "lapLength" &&
+                            property.floating_value == 450.0;
+          saw_stagger |= property.object_id == 1704U && property.name == "staggerOffset" &&
+                         property.floating_value == 120.0;
+        }
+        for (const auto& relation : batch.value().semantic_relations) {
+          saw_group_child |= relation.kind == SemanticRelationKind::subelement &&
+                             relation.source_id == 1701U && relation.target_id == 1702U;
+          saw_end_child |= relation.kind == SemanticRelationKind::subelement &&
+                           relation.source_id == 1701U && relation.target_id == 1703U;
+          saw_splitter_child |= relation.kind == SemanticRelationKind::subelement &&
+                                relation.source_id == 1701U && relation.target_id == 1704U;
+        }
+      }
+    }
+    CHECK(saw_set && saw_group && saw_end_detail && saw_splitter,
+          "persisted rebar-set objects have stable semantic identities");
+    CHECK(saw_name && saw_grade && saw_radius,
+          "rebar sets expose their persisted reinforcement properties");
+    CHECK(saw_end_offset && saw_lap_length && saw_stagger,
+          "rebar-set modifiers expose their persisted behavior");
+    CHECK(saw_group_child && saw_end_child && saw_splitter_child,
+          "rebar-set groups and modifiers are linked to their owning set");
+  }
+
+  const auto parallel_leg_weld_bytes = database_with_polygon_weld_geometry(
+      false, false, PolygonWeldFrameFixture::leg_parallel_to_tangent);
+  ModelPackage parallel_leg_weld_package;
+  parallel_leg_weld_package.add(Asset::copy(
+      AssetRole::model_database, "parallel-leg-polygon-weld.db1", parallel_leg_weld_bytes));
+  auto parallel_leg_weld_model = open(std::move(parallel_leg_weld_package));
+  CHECK(parallel_leg_weld_model.has_value(), "a parallel-leg polygon-weld database opens");
+  if (parallel_leg_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = parallel_leg_weld_model.value().process(request);
+    CHECK(processed.has_value(), "parallel-leg polygon-weld processing remains object-scoped");
+    bool emitted_mesh = false;
+    bool saw_invalid_geometry = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "parallel-leg polygon-weld batches fail open");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          emitted_mesh = emitted_mesh || mesh.object_id == 1201U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_invalid_geometry =
+              saw_invalid_geometry ||
+              (diagnostic.object_id == 1201U && diagnostic.code == ErrorCode::invalid_geometry &&
+               diagnostic.message.find("polygon-weld") != std::string_view::npos);
+        }
+      }
+    }
+    CHECK(
+        !emitted_mesh && saw_invalid_geometry,
+        "a polygon-weld leg parallel to its segment tangent is rejected with an object diagnostic");
+  }
+
+  const auto almost_parallel_leg_weld_bytes = database_with_polygon_weld_geometry(
+      false, false, PolygonWeldFrameFixture::leg_almost_parallel_to_tangent);
+  ModelPackage almost_parallel_leg_weld_package;
+  almost_parallel_leg_weld_package.add(Asset::copy(AssetRole::model_database,
+                                                   "almost-parallel-leg-polygon-weld.db1",
+                                                   almost_parallel_leg_weld_bytes));
+  auto almost_parallel_leg_weld_model = open(std::move(almost_parallel_leg_weld_package));
+  CHECK(almost_parallel_leg_weld_model.has_value(),
+        "an almost-parallel-leg polygon-weld database opens");
+  if (almost_parallel_leg_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = almost_parallel_leg_weld_model.value().process(request);
+    CHECK(processed.has_value(),
+          "almost-parallel-leg polygon-weld processing remains object-scoped");
+    bool emitted_mesh = false;
+    bool saw_invalid_geometry = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "almost-parallel-leg polygon-weld batches fail open");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          emitted_mesh = emitted_mesh || mesh.object_id == 1201U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_invalid_geometry =
+              saw_invalid_geometry ||
+              (diagnostic.object_id == 1201U && diagnostic.code == ErrorCode::invalid_geometry &&
+               diagnostic.message.find("polygon-weld") != std::string_view::npos);
+        }
+      }
+    }
+    CHECK(!emitted_mesh && saw_invalid_geometry,
+          "a polygon-weld leg within 1e-8 radians of its segment tangent is rejected");
+  }
+
+  const auto reversed_frame_weld_bytes = database_with_polygon_weld_geometry(
+      false, false, PolygonWeldFrameFixture::reversed_handedness);
+  ModelPackage reversed_frame_weld_package;
+  reversed_frame_weld_package.add(Asset::copy(
+      AssetRole::model_database, "reversed-frame-polygon-weld.db1", reversed_frame_weld_bytes));
+  auto reversed_frame_weld_model = open(std::move(reversed_frame_weld_package));
+  CHECK(reversed_frame_weld_model.has_value(), "a reversed-frame polygon-weld database opens");
+  if (reversed_frame_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = reversed_frame_weld_model.value().process(request);
+    CHECK(processed.has_value(), "reversed-frame polygon-weld processing is available");
+    bool saw_outward_mesh = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "reversed-frame polygon-weld batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          if (mesh.object_id != 1201U) continue;
+          double signed_volume = 0.0;
+          bool nondegenerate = true;
+          for (std::size_t index = 0U; index + 2U < mesh.indices.size(); index += 3U) {
+            const auto vertex = [&](std::uint32_t vertex_index) {
+              const auto offset = static_cast<std::size_t>(vertex_index) * 3U;
+              return std::array<double, 3>{mesh.positions[offset], mesh.positions[offset + 1U],
+                                           mesh.positions[offset + 2U]};
+            };
+            const auto first = vertex(mesh.indices[index]);
+            const auto second = vertex(mesh.indices[index + 1U]);
+            const auto third = vertex(mesh.indices[index + 2U]);
+            const std::array<double, 3> edge_a{second[0] - first[0], second[1] - first[1],
+                                               second[2] - first[2]};
+            const std::array<double, 3> edge_b{third[0] - first[0], third[1] - first[1],
+                                               third[2] - first[2]};
+            const std::array<double, 3> normal{edge_a[1] * edge_b[2] - edge_a[2] * edge_b[1],
+                                               edge_a[2] * edge_b[0] - edge_a[0] * edge_b[2],
+                                               edge_a[0] * edge_b[1] - edge_a[1] * edge_b[0]};
+            nondegenerate =
+                nondegenerate &&
+                (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2] > 1.0e-12);
+            signed_volume += (first[0] * (second[1] * third[2] - second[2] * third[1]) +
+                              first[1] * (second[2] * third[0] - second[0] * third[2]) +
+                              first[2] * (second[0] * third[1] - second[1] * third[0])) /
+                             6.0;
+          }
+          saw_outward_mesh = nondegenerate && signed_volume > 1.0e-9;
+        }
+      }
+    }
+    CHECK(saw_outward_mesh,
+          "a reversed polygon-weld frame is canonicalized to nondegenerate outward faces");
+  }
+
+  const auto noisy_frame_weld_bytes = database_with_polygon_weld_geometry(
+      false, false, PolygonWeldFrameFixture::noisy_tangent_component);
+  ModelPackage noisy_frame_weld_package;
+  noisy_frame_weld_package.add(Asset::copy(AssetRole::model_database,
+                                           "noisy-frame-polygon-weld.db1", noisy_frame_weld_bytes));
+  auto noisy_frame_weld_model = open(std::move(noisy_frame_weld_package));
+  CHECK(noisy_frame_weld_model.has_value(), "a noisy-frame polygon-weld database opens");
+  if (noisy_frame_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = noisy_frame_weld_model.value().process(request);
+    CHECK(processed.has_value(), "noisy-frame polygon-weld processing is available");
+    bool saw_projected_mesh = false;
+    bool saw_object_diagnostic = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "noisy-frame polygon-weld batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          saw_projected_mesh =
+              saw_projected_mesh || (mesh.object_id == 1201U && mesh.positions.size() == 18U &&
+                                     mesh.indices.size() == 24U);
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_object_diagnostic = saw_object_diagnostic || diagnostic.object_id == 1201U;
+        }
+      }
+    }
+    CHECK(saw_projected_mesh && !saw_object_diagnostic,
+          "a persisted weld leg with a 4.6e-5 tangent cosine is projected into the segment plane");
+  }
+
+  const auto collinear_basis_weld_bytes = database_with_polygon_weld_geometry(
+      false, false, PolygonWeldFrameFixture::collinear_model_basis);
+  ModelPackage collinear_basis_weld_package;
+  collinear_basis_weld_package.add(Asset::copy(
+      AssetRole::model_database, "collinear-basis-polygon-weld.db1", collinear_basis_weld_bytes));
+  auto collinear_basis_weld_model = open(std::move(collinear_basis_weld_package));
+  CHECK(collinear_basis_weld_model.has_value(), "a collinear-basis polygon-weld database opens");
+  if (collinear_basis_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = collinear_basis_weld_model.value().process(request);
+    CHECK(processed.has_value(), "collinear-basis polygon-weld processing remains object-scoped");
+    bool emitted_mesh = false;
+    bool saw_invalid_geometry = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "collinear-basis polygon-weld batches fail open");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          emitted_mesh = emitted_mesh || mesh.object_id == 1201U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_invalid_geometry =
+              saw_invalid_geometry ||
+              (diagnostic.object_id == 1201U && diagnostic.code == ErrorCode::invalid_geometry &&
+               diagnostic.message.find("polygon-weld") != std::string_view::npos);
+        }
+      }
+    }
+    CHECK(!emitted_mesh && saw_invalid_geometry,
+          "a polygon-weld with a collinear model coordinate basis is rejected before meshing");
+  }
+
+  const auto large_origin_weld_bytes = database_with_polygon_weld_geometry(
+      false, false, PolygonWeldFrameFixture::large_model_origin);
+  ModelPackage large_origin_weld_package;
+  large_origin_weld_package.add(Asset::copy(
+      AssetRole::model_database, "large-origin-polygon-weld.db1", large_origin_weld_bytes));
+  auto large_origin_weld_model = open(std::move(large_origin_weld_package));
+  CHECK(large_origin_weld_model.has_value(), "a large-origin polygon-weld database opens");
+  if (large_origin_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = large_origin_weld_model.value().process(request);
+    CHECK(processed.has_value(), "large-origin polygon-weld processing remains object-scoped");
+    bool emitted_mesh = false;
+    bool saw_invalid_geometry = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "large-origin polygon-weld batches fail open");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          emitted_mesh = emitted_mesh || mesh.object_id == 1201U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_invalid_geometry =
+              saw_invalid_geometry ||
+              (diagnostic.object_id == 1201U && diagnostic.code == ErrorCode::invalid_geometry &&
+               diagnostic.message.find("polygon-weld") != std::string_view::npos);
+        }
+      }
+    }
+    CHECK(!emitted_mesh && saw_invalid_geometry,
+          "a polygon-weld whose 5mm and 10mm features collapse after float conversion is rejected");
+  }
+
+  const auto malformed_polygon_weld_bytes = database_with_polygon_weld_geometry(true);
+  ModelPackage malformed_polygon_weld_package;
+  malformed_polygon_weld_package.add(Asset::copy(
+      AssetRole::model_database, "malformed-polygon-weld.db1", malformed_polygon_weld_bytes));
+  auto malformed_polygon_weld_model = open(std::move(malformed_polygon_weld_package));
+  CHECK(malformed_polygon_weld_model.has_value(), "a malformed polygon-weld database opens");
+  if (malformed_polygon_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = malformed_polygon_weld_model.value().process(request);
+    CHECK(processed.has_value(), "malformed polygon-weld processing remains object-scoped");
+    bool emitted_mesh = false;
+    bool saw_invalid_geometry = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "malformed polygon-weld batches fail open");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          emitted_mesh = emitted_mesh || mesh.object_id == 1201U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_invalid_geometry =
+              saw_invalid_geometry ||
+              (diagnostic.object_id == 1201U && diagnostic.code == ErrorCode::invalid_geometry &&
+               diagnostic.message.find("polygon-weld") != std::string_view::npos);
+        }
+      }
+    }
+    CHECK(!emitted_mesh && saw_invalid_geometry,
+          "an incomplete persisted weld path is omitted with an object-scoped diagnostic");
+  }
+
+  ModelPackage bounded_polygon_weld_package;
+  bounded_polygon_weld_package.add(
+      Asset::copy(AssetRole::model_database, "bounded-polygon-weld.db1", polygon_weld_bytes));
+  auto bounded_polygon_weld_model = open(std::move(bounded_polygon_weld_package));
+  CHECK(bounded_polygon_weld_model.has_value(), "a bounded polygon-weld database opens");
+  if (bounded_polygon_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    request.geometry_memory_budget_bytes = 192U;
+    auto processed = bounded_polygon_weld_model.value().process(request);
+    CHECK(processed.has_value(), "bounded polygon-weld processing remains object-scoped");
+    bool emitted_mesh = false;
+    bool saw_resource_limit = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "bounded polygon-weld batches fail open");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          emitted_mesh = emitted_mesh || mesh.object_id == 1201U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_resource_limit =
+              saw_resource_limit ||
+              (diagnostic.object_id == 1201U && diagnostic.code == ErrorCode::resource_limit &&
+               diagnostic.message.find("Polygon-weld") != std::string_view::npos);
+        }
+      }
+    }
+    CHECK(!emitted_mesh && saw_resource_limit,
+          "polygon-weld retained rows and meshes honor the aggregate geometry budget");
+  }
+
+  const auto merged_polygon_weld_bytes =
+      database_with_polygon_weld_geometry(false, false, PolygonWeldFrameFixture::orthogonal, 2U);
+  ModelPackage merged_polygon_weld_package;
+  merged_polygon_weld_package.add(
+      Asset::copy(AssetRole::model_database, "merged-polygon-weld.db1", merged_polygon_weld_bytes));
+  auto merged_polygon_weld_model = open(std::move(merged_polygon_weld_package));
+  CHECK(merged_polygon_weld_model.has_value(), "a two-polygon single-weld database opens");
+  if (merged_polygon_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    request.geometry_memory_budget_bytes = 648U;
+    auto processed = merged_polygon_weld_model.value().process(request);
+    CHECK(processed.has_value(), "two-polygon weld processing honors its tight budget");
+    std::size_t weld_meshes = 0U;
+    bool saw_complete_mesh = false;
+    bool saw_resource_limit = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "two-polygon weld batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          if (mesh.object_id != 1201U) continue;
+          ++weld_meshes;
+          saw_complete_mesh = mesh.positions.size() == 36U && mesh.indices.size() == 48U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_resource_limit = saw_resource_limit || (diagnostic.object_id == 1201U &&
+                                                      diagnostic.code == ErrorCode::resource_limit);
+        }
+      }
+    }
+    CHECK(weld_meshes == 1U && saw_complete_mesh && !saw_resource_limit,
+          "merged polygon geometry charges one MeshData overhead for its weld owner");
+  }
+
+  const auto many_row_weld_bytes = database_with_polygon_weld_geometry(
+      false, false, PolygonWeldFrameFixture::orthogonal, 1U, 4U);
+  ModelPackage many_row_weld_package;
+  many_row_weld_package.add(
+      Asset::copy(AssetRole::model_database, "many-row-polygon-weld.db1", many_row_weld_bytes));
+  auto many_row_weld_model = open(std::move(many_row_weld_package));
+  CHECK(many_row_weld_model.has_value(), "a many-row polygon-weld database opens");
+  if (many_row_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    request.geometry_memory_budget_bytes = 1168U;
+    auto processed = many_row_weld_model.value().process(request);
+    CHECK(processed.has_value(), "many-row polygon-weld processing honors its tight budget");
+    bool saw_complete_mesh = false;
+    bool saw_resource_limit = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "many-row polygon-weld batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          saw_complete_mesh =
+              saw_complete_mesh || (mesh.object_id == 1201U && mesh.positions.size() == 54U &&
+                                    mesh.indices.size() == 96U);
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          saw_resource_limit = saw_resource_limit || (diagnostic.object_id == 1201U &&
+                                                      diagnostic.code == ErrorCode::resource_limit);
+        }
+      }
+    }
+    CHECK(saw_complete_mesh && !saw_resource_limit,
+          "many-row weld paths need no unbudgeted flattened-value allocation");
+  }
+
+  const auto semantic_only_weld_bytes = database_with_polygon_weld_geometry(false, true);
+  ModelPackage semantic_only_weld_package;
+  semantic_only_weld_package.add(Asset::copy(
+      AssetRole::model_database, "semantic-only-polygon-weld.db1", semantic_only_weld_bytes));
+  auto semantic_only_weld_model = open(std::move(semantic_only_weld_package));
+  CHECK(semantic_only_weld_model.has_value(), "a logical compound-weld database opens");
+  if (semantic_only_weld_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = semantic_only_weld_model.value().process(request);
+    CHECK(processed.has_value(), "logical compound-weld processing remains available");
+    bool emitted_mesh = false;
+    bool emitted_diagnostic = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "logical compound-weld batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& mesh : batch.value().meshes) {
+          emitted_mesh = emitted_mesh || mesh.object_id == 1201U;
+        }
+        for (const auto& diagnostic : batch.value().diagnostics) {
+          emitted_diagnostic = emitted_diagnostic || diagnostic.object_id == 1201U;
+        }
+      }
+    }
+    CHECK(!emitted_mesh && !emitted_diagnostic,
+          "logical and compound welds remain semantic-only without guessed geometry");
   }
 
   ModelPackage semantic_package;
@@ -2075,6 +3942,8 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
         } else if (batch.value().kind == BatchKind::meshes) {
           meshes += batch.value().meshes.size();
           CHECK(!batch.value().meshes.empty() &&
+                    batch.value().meshes.front().coordinate_space ==
+                        MeshCoordinateMode::model_space &&
                     batch.value().meshes.front().positions.size() == 24 &&
                     batch.value().meshes.front().indices.size() == 36 &&
                     batch.value().meshes.front().has_report_metrics &&
@@ -2094,6 +3963,51 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     CHECK(!first_signature.empty() && first_signature == second_signature,
           "repeated processing emits the same ordered display geometry");
 
+    ProcessRequest world_request;
+    world_request.stages = Stage::display_geometry;
+    auto world_processed = geometry_model.value().process(world_request);
+    ProcessRequest local_request;
+    local_request.stages = Stage::display_geometry;
+    local_request.mesh_coordinate_mode = MeshCoordinateMode::local_with_rigid_placement;
+    auto local_processed = geometry_model.value().process(local_request);
+    CHECK(world_processed.has_value() && local_processed.has_value(),
+          "world and placed-local display processing are both available");
+    if (world_processed && local_processed) {
+      auto world_batch = world_processed.value()->next();
+      auto local_batch = local_processed.value()->next();
+      CHECK(world_batch.has_value() && local_batch.has_value() &&
+                world_batch.value().kind == BatchKind::meshes &&
+                local_batch.value().kind == BatchKind::meshes &&
+                world_batch.value().meshes.size() == 1U && local_batch.value().meshes.size() == 1U,
+            "the analytic fixture emits matching world and placed-local mesh batches");
+      if (world_batch && local_batch && world_batch.value().kind == BatchKind::meshes &&
+          local_batch.value().kind == BatchKind::meshes &&
+          world_batch.value().meshes.size() == 1U && local_batch.value().meshes.size() == 1U) {
+        const auto& world_mesh = world_batch.value().meshes.front();
+        const auto& local_mesh = local_batch.value().meshes.front();
+        CHECK(local_mesh.coordinate_space == MeshCoordinateMode::local_with_rigid_placement &&
+                  local_mesh.placement.origin.x == 10.0 && local_mesh.placement.origin.y == 20.0 &&
+                  local_mesh.placement.origin.z == 30.0 && local_mesh.placement.x_axis.x == 1.0 &&
+                  local_mesh.placement.y_axis.y == 1.0 && local_mesh.placement.z_axis.z == 1.0,
+              "a requested local mesh carries its persisted rigid placement");
+        CHECK(reconstructs_model_mesh(local_mesh, world_mesh),
+              "the local placement reconstructs the unchanged world mesh and topology");
+        CHECK(local_mesh.has_report_metrics == world_mesh.has_report_metrics &&
+                  local_mesh.has_cover_surface_area == world_mesh.has_cover_surface_area &&
+                  local_mesh.has_section_extents == world_mesh.has_section_extents &&
+                  local_mesh.surface_area == world_mesh.surface_area &&
+                  local_mesh.cover_surface_area == world_mesh.cover_surface_area &&
+                  local_mesh.volume == world_mesh.volume &&
+                  local_mesh.longitudinal_min == world_mesh.longitudinal_min &&
+                  local_mesh.longitudinal_max == world_mesh.longitudinal_max &&
+                  local_mesh.section_y_min == world_mesh.section_y_min &&
+                  local_mesh.section_y_max == world_mesh.section_y_max &&
+                  local_mesh.section_z_min == world_mesh.section_z_min &&
+                  local_mesh.section_z_max == world_mesh.section_z_max,
+              "coordinate representation does not change double-precision report metrics");
+      }
+    }
+
     ProcessRequest excluded_request;
     excluded_request.stages = Stage::display_geometry;
     excluded_request.geometry_object_id_min = 1202;
@@ -2103,6 +4017,90 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
       auto batch = excluded.value()->next();
       CHECK(batch.has_value() && batch.value().kind == BatchKind::end,
             "geometry outside the requested internal-id window is skipped");
+    }
+  }
+
+  const auto rotated_frame_bytes = database_with_rotated_part_frame();
+  ModelPackage rotated_frame_package;
+  rotated_frame_package.add(
+      Asset::copy(AssetRole::model_database, "rotated-frame.db1", rotated_frame_bytes));
+  auto rotated_frame_model = open(std::move(rotated_frame_package));
+  CHECK(rotated_frame_model.has_value(), "the rotated-frame geometry fixture opens");
+  if (rotated_frame_model) {
+    ProcessRequest world_request;
+    world_request.stages = Stage::display_geometry;
+    auto world_processed = rotated_frame_model.value().process(world_request);
+    ProcessRequest local_request;
+    local_request.stages = Stage::display_geometry;
+    local_request.mesh_coordinate_mode = MeshCoordinateMode::local_with_rigid_placement;
+    auto local_processed = rotated_frame_model.value().process(local_request);
+    CHECK(world_processed.has_value() && local_processed.has_value(),
+          "a rotated frame can be processed in both coordinate modes");
+    if (world_processed && local_processed) {
+      auto world_batch = world_processed.value()->next();
+      auto local_batch = local_processed.value()->next();
+      CHECK(world_batch.has_value() && local_batch.has_value() &&
+                world_batch.value().kind == BatchKind::meshes &&
+                local_batch.value().kind == BatchKind::meshes &&
+                world_batch.value().meshes.size() == 1U && local_batch.value().meshes.size() == 1U,
+            "a rotated frame emits matching world and placed-local batches");
+      if (world_batch && local_batch && world_batch.value().kind == BatchKind::meshes &&
+          local_batch.value().kind == BatchKind::meshes &&
+          world_batch.value().meshes.size() == 1U && local_batch.value().meshes.size() == 1U) {
+        const auto& world_mesh = world_batch.value().meshes.front();
+        const auto& local_mesh = local_batch.value().meshes.front();
+        CHECK(local_mesh.coordinate_space == MeshCoordinateMode::local_with_rigid_placement &&
+                  local_mesh.placement.origin.x == 10.0 && local_mesh.placement.origin.y == 20.0 &&
+                  local_mesh.placement.origin.z == 30.0 && local_mesh.placement.x_axis.x == 0.0 &&
+                  local_mesh.placement.x_axis.y == 1.0 && local_mesh.placement.y_axis.x == -1.0 &&
+                  local_mesh.placement.y_axis.y == 0.0 && local_mesh.placement.z_axis.z == 1.0,
+              "a placed mesh publishes local-to-model basis vectors as matrix columns");
+        CHECK(reconstructs_model_mesh(local_mesh, world_mesh),
+              "column-oriented placement reconstructs rotated model geometry");
+      }
+    }
+  }
+
+  const auto skewed_frame_bytes = database_with_skewed_part_frame();
+  ModelPackage skewed_frame_package;
+  skewed_frame_package.add(
+      Asset::copy(AssetRole::model_database, "skewed-frame.db1", skewed_frame_bytes));
+  auto skewed_frame_model = open(std::move(skewed_frame_package));
+  CHECK(skewed_frame_model.has_value(), "the skewed-frame geometry fixture opens");
+  if (skewed_frame_model) {
+    ProcessRequest world_request;
+    world_request.stages = Stage::display_geometry;
+    auto world_processed = skewed_frame_model.value().process(world_request);
+    ProcessRequest local_request;
+    local_request.stages = Stage::display_geometry;
+    local_request.mesh_coordinate_mode = MeshCoordinateMode::local_with_rigid_placement;
+    auto local_processed = skewed_frame_model.value().process(local_request);
+    CHECK(world_processed.has_value() && local_processed.has_value(),
+          "a skewed frame can be processed in both coordinate modes");
+    if (world_processed && local_processed) {
+      auto world_batch = world_processed.value()->next();
+      auto local_batch = local_processed.value()->next();
+      CHECK(world_batch.has_value() && local_batch.has_value() &&
+                world_batch.value().kind == BatchKind::meshes &&
+                local_batch.value().kind == BatchKind::meshes &&
+                world_batch.value().meshes.size() == 1U && local_batch.value().meshes.size() == 1U,
+            "a skewed frame still emits one mesh in either requested mode");
+      if (world_batch && local_batch && world_batch.value().kind == BatchKind::meshes &&
+          local_batch.value().kind == BatchKind::meshes &&
+          world_batch.value().meshes.size() == 1U && local_batch.value().meshes.size() == 1U) {
+        const auto& world_mesh = world_batch.value().meshes.front();
+        const auto& local_mesh = local_batch.value().meshes.front();
+        CHECK(local_mesh.coordinate_space == MeshCoordinateMode::model_space &&
+                  local_mesh.placement.origin.x == 0.0 && local_mesh.placement.origin.y == 0.0 &&
+                  local_mesh.placement.origin.z == 0.0 && local_mesh.placement.x_axis.x == 1.0 &&
+                  local_mesh.placement.y_axis.y == 1.0 && local_mesh.placement.z_axis.z == 1.0 &&
+                  std::equal(local_mesh.positions.begin(), local_mesh.positions.end(),
+                             world_mesh.positions.begin(), world_mesh.positions.end()),
+              "an untrustworthy frame falls back for that mesh to unchanged model coordinates");
+        CHECK(local_mesh.surface_area == world_mesh.surface_area &&
+                  local_mesh.volume == world_mesh.volume,
+              "a per-mesh placement fallback preserves report metrics");
+      }
     }
   }
 
@@ -2169,7 +4167,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
   }
 
   for (const auto& [profile, positions, indices, expected_bounds] :
-       std::array<std::tuple<std::string_view, std::size_t, std::size_t, std::array<float, 6>>, 34>{
+       std::array<std::tuple<std::string_view, std::size_t, std::size_t, std::array<float, 6>>, 39>{
            std::tuple{"IPE200", 168U, 324U,
                       std::array<float, 6>{10.0F, -80.0F, -20.0F, 1010.0F, 120.0F, 80.0F}},
            std::tuple{"HEA120", 168U, 324U,
@@ -2180,6 +4178,12 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
                       std::array<float, 6>{10.0F, -100.0F, -83.0F, 1010.0F, 140.0F, 143.0F}},
            std::tuple{"U220", 48U, 84U,
                       std::array<float, 6>{10.0F, -90.0F, -10.0F, 1010.0F, 130.0F, 70.0F}},
+           std::tuple{"PFC200*90*30", 96U, 180U,
+                      std::array<float, 6>{10.0F, -80.0F, -15.0F, 1010.0F, 120.0F, 75.0F}},
+           std::tuple{"SPHERE60.3", 900U, 1788U,
+                      std::array<float, 6>{10.0F, -10.15F, -0.15F, 1010.0F, 50.15F, 60.15F}},
+           std::tuple{"CAP2135", 960U, 1920U,
+                      std::array<float, 6>{10.0F, -1047.5F, -1037.5F, 510.0F, 1087.5F, 1097.5F}},
            std::tuple{"BL15*130", 24U, 36U,
                       std::array<float, 6>{10.0F, -45.0F, 22.5F, 1010.0F, 85.0F, 37.5F}},
            std::tuple{"HWR77*42", 24U, 36U,
@@ -2194,6 +4198,10 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
                       std::array<float, 6>{10.0F, -255.0F, -97.0F, 1010.0F, 295.0F, 157.0F}},
            std::tuple{"O50-2", 192U, 384U,
                       std::array<float, 6>{10.0F, -5.0F, 5.0F, 1010.0F, 45.0F, 55.0F}},
+           std::tuple{"O112*10", 240U, 480U,
+                      std::array<float, 6>{10.0F, -36.0F, -26.0F, 1010.0F, 76.0F, 86.0F}},
+           std::tuple{"SPD2135*16", 912U, 1824U,
+                      std::array<float, 6>{10.0F, -1047.5F, -1037.5F, 1010.0F, 1087.5F, 1097.5F}},
            std::tuple{"QR100*5", 48U, 96U,
                       std::array<float, 6>{10.0F, -30.0F, -20.0F, 1010.0F, 70.0F, 80.0F}},
            std::tuple{"RHS90*4", 48U, 96U,
@@ -2436,8 +4444,8 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
       auto batch = processed.value()->next();
       CHECK(batch.has_value() && batch.value().kind == BatchKind::meshes &&
                 batch.value().meshes.size() == 1 &&
-                batch.value().meshes.front().positions.size() == 450 &&
-                batch.value().meshes.front().indices.size() == 888,
+                batch.value().meshes.front().positions.size() == 432 &&
+                batch.value().meshes.front().indices.size() == 852,
             "a rounded persisted contour becomes a closed plate mesh");
     }
   }
@@ -2461,6 +4469,29 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
                 batch.value().meshes.front().positions.size() > 24 &&
                 batch.value().meshes.front().indices.size() > 36,
             "a persisted three-point arc becomes a tessellated plate edge");
+    }
+  }
+
+  const auto mixed_contour_bytes = database_with_one_object(
+      "PL10", "14", "9.08", false, 2, true, false, false, false, false, false, false, false, false,
+      false, false, false, false, false, false, PartFrameFixture::orthogonal, true);
+  ModelPackage mixed_contour_package;
+  mixed_contour_package.add(
+      Asset::copy(AssetRole::model_database, "mixed-contour.db1", mixed_contour_bytes));
+  auto mixed_contour_model = open(std::move(mixed_contour_package));
+  CHECK(mixed_contour_model.has_value(), "the mixed-curve contour fixture opens");
+  if (mixed_contour_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = mixed_contour_model.value().process(request);
+    CHECK(processed.has_value(), "mixed-curve contour processing is available");
+    if (processed) {
+      auto batch = processed.value()->next();
+      CHECK(batch.has_value() && batch.value().kind == BatchKind::meshes &&
+                batch.value().meshes.size() == 1 &&
+                batch.value().meshes.front().positions.size() > 24 &&
+                batch.value().meshes.front().indices.size() > 36,
+            "rounding and three-point arcs compose within one persisted contour");
     }
   }
 
@@ -2974,6 +5005,41 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
   check_boolean_graph(3U, true, ErrorCode::invalid_topology, "cycle", false);
   check_boolean_graph(35U, false, ErrorCode::resource_limit, "depth", false);
   check_boolean_graph(3U, true, ErrorCode::none, {}, true);
+
+  const auto additive_bytes = database_with_boolean_chain(2U, false, false, false, false, true);
+  ModelPackage additive_package;
+  additive_package.add(
+      Asset::copy(AssetRole::model_database, "additive-boolean.db1", additive_bytes));
+  auto additive_model = open(std::move(additive_package));
+  CHECK(additive_model.has_value(), "the additive Boolean fixture opens");
+  if (additive_model) {
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    request.topology_mode = TopologyMode::direct;
+    auto processed = additive_model.value().process(request);
+    CHECK(processed.has_value(), "the additive Boolean fixture processes");
+    float maximum_x = std::numeric_limits<float>::lowest();
+    double host_volume = 0.0;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "additive Boolean batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        if (batch.value().kind != BatchKind::meshes) continue;
+        for (const auto& mesh : batch.value().meshes) {
+          if (mesh.object_id != 1201U) continue;
+          host_volume = mesh.volume;
+          for (std::size_t coordinate = 0U; coordinate < mesh.positions.size(); coordinate += 3U) {
+            maximum_x = std::max(maximum_x, mesh.positions[coordinate]);
+          }
+        }
+      }
+    }
+    CHECK(maximum_x > 1159.0F,
+          "a persisted type-38 Boolean operand adds material beyond the host bounds");
+    CHECK(host_volume > 41'000'000.0 && host_volume < 43'000'000.0,
+          "a hollow type-38 operand adds its material shell rather than its filled envelope");
+  }
 
   const auto swept_boolean_bytes = database_with_boolean_chain(2U, false, false, false, true);
   ModelPackage swept_boolean_package;

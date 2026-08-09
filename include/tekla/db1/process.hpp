@@ -28,6 +28,14 @@ enum class TopologyMode {
   supervised,
 };
 
+// Controls the coordinate representation of public display meshes. Model
+// space is the compatibility default. Local meshes are emitted only when a
+// trustworthy rigid placement is available for that individual mesh.
+enum class MeshCoordinateMode {
+  model_space,
+  local_with_rigid_placement,
+};
+
 constexpr Stage operator|(Stage lhs, Stage rhs) noexcept {
   return static_cast<Stage>(static_cast<std::uint32_t>(lhs) | static_cast<std::uint32_t>(rhs));
 }
@@ -59,6 +67,25 @@ struct ProcessRequest {
   // names and properties for every selected geometry object.
   std::uint64_t geometry_object_id_min = 0;
   std::uint64_t geometry_object_id_max = std::numeric_limits<std::uint64_t>::max();
+  MeshCoordinateMode mesh_coordinate_mode = MeshCoordinateMode::model_space;
+};
+
+struct Vector3d {
+  double x = 0.0;
+  double y = 0.0;
+  double z = 0.0;
+};
+
+// Transforms local mesh coordinates to model coordinates as
+// origin + x_axis*x + y_axis*y + z_axis*z. The axes are the columns of a
+// local-to-model matrix; origin and coordinates remain in model units. Meshes
+// advertise this placement only with local_with_rigid_placement; the default
+// value is the identity.
+struct RigidPlacementView {
+  Vector3d origin;
+  Vector3d x_axis{1.0, 0.0, 0.0};
+  Vector3d y_axis{0.0, 1.0, 0.0};
+  Vector3d z_axis{0.0, 0.0, 1.0};
 };
 
 struct MeshView {
@@ -84,12 +111,8 @@ struct MeshView {
   bool has_report_metrics = false;
   bool has_cover_surface_area = false;
   bool has_section_extents = false;
-};
-
-struct Vector3d {
-  double x = 0.0;
-  double y = 0.0;
-  double z = 0.0;
+  MeshCoordinateMode coordinate_space = MeshCoordinateMode::model_space;
+  RigidPlacementView placement{};
 };
 
 enum class CurveGeometryKind {
@@ -178,7 +201,16 @@ enum class ObjectKind {
   single_rebar,
   rebar_group,
   rebar_mesh,
+  rebar_set,
+  rebar_set_group,
+  rebar_end_detail_modifier,
+  rebar_splitter,
+  rebar_splice,
   assembly,
+  surface_treatment,
+  surface_object,
+  pour_object,
+  pour_unit,
 };
 
 // A persisted object can either be an independently meaningful model element
@@ -264,6 +296,9 @@ enum class SemanticRelationOrigin {
   assembly_membership,
   component_connection,
   rebar_host,
+  rebar_splice,
+  pour_membership,
+  surface_object,
 };
 
 // Output-neutral graph semantics reconstructed from persisted DB1 state.

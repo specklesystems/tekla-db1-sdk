@@ -1,5 +1,7 @@
 #include "identity.hpp"
 
+#include "weld_semantics.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -162,7 +164,16 @@ ObjectKind object_kind(std::uint32_t type, std::uint32_t subtype) noexcept {
     if (subtype == 0U) return ObjectKind::single_rebar;
     if (subtype == 1U) return ObjectKind::rebar_group;
     if (subtype == 6U || subtype == 8U) return ObjectKind::rebar_mesh;
+    if (subtype == 9U) return ObjectKind::rebar_set;
   }
+  if (type == 73U && subtype == 3U) return ObjectKind::surface_treatment;
+  if (type == 74U && subtype == 0U) return ObjectKind::rebar_splice;
+  if (type == 96U && subtype == 1U) return ObjectKind::rebar_end_detail_modifier;
+  if (type == 96U && subtype == 3U) return ObjectKind::rebar_splitter;
+  if (type == 97U && subtype == 1U) return ObjectKind::surface_object;
+  if (type == 10247U && subtype == 0U) return ObjectKind::rebar_set_group;
+  if (type == 90U && subtype == 0U) return ObjectKind::pour_object;
+  if (type == 101U && subtype == 0U) return ObjectKind::pour_unit;
   return ObjectKind::unknown;
 }
 
@@ -306,62 +317,6 @@ class IdentityReader final : public BatchReader {
   return Result<ObjectOffsets>::success(result);
 }
 
-[[nodiscard]] Result<std::unordered_map<std::uint32_t, WeldLocation>> weld_locations(
-    const ModelStorage& storage, const Schema& schema) {
-  std::unordered_map<std::uint32_t, WeldLocation> result;
-  const auto* welding_schema = schema.find_table("welding");
-  const auto* common_schema = schema.find_table("welding_common_attr");
-  if (welding_schema == nullptr || common_schema == nullptr ||
-      welding_schema->ordinal >= storage.layout.tables.size() ||
-      common_schema->ordinal >= storage.layout.tables.size()) {
-    return Result<std::unordered_map<std::uint32_t, WeldLocation>>::success(std::move(result));
-  }
-  const auto& welding_table = storage.layout.tables[welding_schema->ordinal];
-  const auto& common_table = storage.layout.tables[common_schema->ordinal];
-  if (welding_table.info.row_count == 0 || common_table.info.row_count == 0) {
-    return Result<std::unordered_map<std::uint32_t, WeldLocation>>::success(std::move(result));
-  }
-
-  auto common_id = u32_offset(schema, *common_schema, "id");
-  auto workshop = u32_offset(schema, *common_schema, "workshop_weld");
-  auto weld_id = u32_offset(schema, *welding_schema, "id");
-  auto common_reference = u32_offset(schema, *welding_schema, "weld_common_attr_id");
-  if (!common_id || !workshop || !weld_id || !common_reference) {
-    return Result<std::unordered_map<std::uint32_t, WeldLocation>>::failure(
-        {ErrorCode::schema_mismatch, "The generated weld semantic layout is incomplete."});
-  }
-
-  std::unordered_map<std::uint32_t, WeldLocation> common_locations;
-  common_locations.reserve(static_cast<std::size_t>(common_table.info.row_count));
-  const auto payload = storage.payload.bytes();
-  for (std::uint64_t row = 0; row < common_table.info.row_count; ++row) {
-    const auto record = common_table.record(payload, row);
-    if (record.empty()) {
-      return Result<std::unordered_map<std::uint32_t, WeldLocation>>::failure(
-          {ErrorCode::invalid_container, "A weld-common record lies outside the payload."});
-    }
-    const auto tuple = record.subspan(1, common_schema->tuple_size);
-    common_locations.insert_or_assign(
-        read_u32(tuple, common_id.value()),
-        read_u32(tuple, workshop.value()) == 1U ? WeldLocation::workshop : WeldLocation::site);
-  }
-
-  result.reserve(static_cast<std::size_t>(welding_table.info.row_count));
-  for (std::uint64_t row = 0; row < welding_table.info.row_count; ++row) {
-    const auto record = welding_table.record(payload, row);
-    if (record.empty()) {
-      return Result<std::unordered_map<std::uint32_t, WeldLocation>>::failure(
-          {ErrorCode::invalid_container, "A welding record lies outside the payload."});
-    }
-    const auto tuple = record.subspan(1, welding_schema->tuple_size);
-    const auto location = common_locations.find(read_u32(tuple, common_reference.value()));
-    if (location != common_locations.end()) {
-      result.insert_or_assign(read_u32(tuple, weld_id.value()), location->second);
-    }
-  }
-  return Result<std::unordered_map<std::uint32_t, WeldLocation>>::success(std::move(result));
-}
-
 }  // namespace
 
 Result<ProcessStream> make_identity_stream(std::shared_ptr<const ModelStorage> storage,
@@ -419,7 +374,7 @@ Result<ProcessStream> make_identity_stream(std::shared_ptr<const ModelStorage> s
     }
   }
 
-  auto locations = weld_locations(*storage, schema);
+  auto locations = load_weld_locations(*storage, schema);
   if (!locations) {
     return Result<ProcessStream>::failure(locations.error());
   }
