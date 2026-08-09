@@ -54,7 +54,18 @@ jobs:
           -P cmake/VerifyReleaseArtifacts.cmake
 
       - name: Configure installed-package consumer
+        if: runner.os != 'Windows'
         run: cmake -S tests/consumer -B build/consumer -DCMAKE_PREFIX_PATH="${{ runner.temp }}/tekla-db1-sdk"
+
+      - name: Configure installed-package consumer on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          cmake -S tests/consumer -B build/consumer -G Ninja
+          -DCMAKE_CXX_COMPILER=C:/mingw64/bin/c++.exe
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-mingw-static
+          "-DCMAKE_PREFIX_PATH=${{ runner.temp }}/tekla-db1-sdk"
 
       - name: Build installed-package consumer
         run: cmake --build build/consumer --config Release
@@ -63,7 +74,19 @@ jobs:
         run: ctest --test-dir build/consumer -C Release --output-on-failure
 
       - name: Configure core-only installed-package consumer
+        if: runner.os != 'Windows'
         run: cmake -S tests/consumer -B build/consumer-core -DCMAKE_PREFIX_PATH="${{ runner.temp }}/tekla-db1-sdk" -DTEKLA_DB1_CONSUMER_REQUIRE_GLTF=OFF
+
+      - name: Configure core-only installed-package consumer on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          cmake -S tests/consumer -B build/consumer-core -G Ninja
+          -DCMAKE_CXX_COMPILER=C:/mingw64/bin/c++.exe
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-mingw-static
+          "-DCMAKE_PREFIX_PATH=${{ runner.temp }}/tekla-db1-sdk"
+          -DTEKLA_DB1_CONSUMER_REQUIRE_GLTF=OFF
 
       - name: Build core-only installed-package consumer
         run: cmake --build build/consumer-core --config Release
