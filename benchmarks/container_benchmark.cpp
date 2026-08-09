@@ -12,9 +12,11 @@
 #include <vector>
 
 #if defined(_WIN32)
+#ifndef NOMINMAX
 #define NOMINMAX
-#include <Psapi.h>
+#endif
 #include <Windows.h>
+#include <Psapi.h>
 #else
 #include <sys/resource.h>
 #endif

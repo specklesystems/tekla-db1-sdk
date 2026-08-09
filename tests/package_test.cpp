@@ -61,7 +61,7 @@ std::vector<std::byte> gzip_member(std::span<const std::byte> input) {
             Z_OK,
         "the test gzip encoder initializes");
 
-  std::vector<std::byte> output(deflateBound(&stream, input.size()));
+  std::vector<std::byte> output(deflateBound(&stream, static_cast<uLong>(input.size())));
   stream.next_in = reinterpret_cast<Bytef*>(const_cast<std::byte*>(input.data()));
   stream.avail_in = static_cast<uInt>(input.size());
   stream.next_out = reinterpret_cast<Bytef*>(output.data());
