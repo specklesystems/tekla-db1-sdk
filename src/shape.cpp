@@ -32,8 +32,8 @@ using Point2 = std::array<double, 2>;
     value.remove_suffix(1);
   }
   std::string result(value);
-  std::transform(result.begin(), result.end(), result.begin(), [](unsigned char value) {
-    return static_cast<char>(std::tolower(value));
+  std::transform(result.begin(), result.end(), result.begin(), [](unsigned char byte) {
+    return static_cast<char>(std::tolower(byte));
   });
   return result;
 }
@@ -41,8 +41,8 @@ using Point2 = std::array<double, 2>;
 [[nodiscard]] std::string normalized_path(std::string_view value) {
   std::string result(value);
   std::replace(result.begin(), result.end(), '\\', '/');
-  std::transform(result.begin(), result.end(), result.begin(), [](unsigned char value) {
-    return static_cast<char>(std::tolower(value));
+  std::transform(result.begin(), result.end(), result.begin(), [](unsigned char byte) {
+    return static_cast<char>(std::tolower(byte));
   });
   return result;
 }

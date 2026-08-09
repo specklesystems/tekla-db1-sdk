@@ -133,7 +133,7 @@ class RetainedGeometryBudget {
   [[nodiscard]] bool can_consume_curve_sets(
       std::span<const std::pair<std::size_t, std::size_t>> sets) const noexcept {
     std::size_t total = 0U;
-    for (const auto [curve_count, point_count] : sets) {
+    for (const auto& [curve_count, point_count] : sets) {
       const auto per_curve = curve_bytes(point_count);
       if (!per_curve) return false;
       const auto bytes = checked_product(curve_count, *per_curve);
@@ -2805,6 +2805,8 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
                                    "Classic rebar-mesh attributes or arrays are invalid."});
             continue;
           }
+          const double longitudinal_spacing_value = longitudinal_spacing.value();
+          const double cross_spacing_value = cross_spacing.value();
           const auto remaining_by_count = expanded_curve_count >= maximum_expanded_curve_count
                                               ? 0U
                                               : maximum_expanded_curve_count - expanded_curve_count;
@@ -2824,10 +2826,10 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
                 vector_length(subtract(distribution_end, distribution_start));
             auto cross_count =
                 regular_distance_count(mesh_attribute->second.longitudinal_overhang_left,
-                                       distribution_length, *cross_spacing);
+                                       distribution_length, cross_spacing_value);
             auto longitudinal_count =
                 regular_distance_count(mesh_attribute->second.cross_overhang_left,
-                                       mesh_attribute->second.width, *longitudinal_spacing);
+                                       mesh_attribute->second.width, longitudinal_spacing_value);
             if (!cross_count || !longitudinal_count) {
               const auto& error = !cross_count ? cross_count.error() : longitudinal_count.error();
               diagnostics.push_back({error.code, rebar_id, error.message});

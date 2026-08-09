@@ -22,7 +22,7 @@ jobs:
         shell: pwsh
         run: >-
           C:\msys64\usr\bin\bash.exe -lc
-          "pacman -S --noconfirm --needed mingw-w64-x86_64-zlib"
+          "pacman -S --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib"
 
       - name: Configure
         run: >-

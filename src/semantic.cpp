@@ -868,7 +868,7 @@ class InstanceReader final : public BatchReader {
   ModelStorage catalog(ModelPackage{}, std::move(payload.value()), std::move(layout.value()));
   const auto schema = projected.value().view();
   std::unordered_map<std::uint32_t, std::uint8_t> name_kinds;
-  for (const auto [table_name, kind_bit] :
+  for (const auto& [table_name, kind_bit] :
        {std::pair{std::string_view{"joint"}, std::uint8_t{1U}},
         std::pair{std::string_view{"macro"}, std::uint8_t{2U}}}) {
     const auto* table_schema = schema.find_table(table_name);
