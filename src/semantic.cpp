@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -421,19 +422,23 @@ struct PourMembership {
   std::uint32_t pour_unit_id = 0U;
 };
 
+struct RebarSpliceConnection {
+  std::uint32_t splice_id = 0U;
+  std::uint32_t first_reinforcement_id = 0U;
+  std::uint32_t second_reinforcement_id = 0U;
+};
+
 class SemanticRelationReader final : public BatchReader {
  public:
-  SemanticRelationReader(std::shared_ptr<const ModelStorage> storage,
-                         std::vector<SemanticObject> objects,
-                         std::unordered_set<std::uint32_t> endpoints,
-                         const TableLayout* relation_layout, const TableSchema* relation_schema,
-                         std::array<std::uint32_t, 4> relation_offsets,
-                         const TableLayout* joint_layout, const TableSchema* joint_schema,
-                         std::array<std::uint32_t, 3> joint_offsets,
-                         std::vector<std::uint32_t> assembly_order,
-                         std::unordered_map<std::uint32_t, std::uint32_t> main_members,
-                         AssemblyMembers assembly_members,
-                         std::vector<PourMembership> pour_memberships, std::size_t batch_size)
+  SemanticRelationReader(
+      std::shared_ptr<const ModelStorage> storage, std::vector<SemanticObject> objects,
+      std::unordered_set<std::uint32_t> endpoints, const TableLayout* relation_layout,
+      const TableSchema* relation_schema, std::array<std::uint32_t, 4> relation_offsets,
+      const TableLayout* joint_layout, const TableSchema* joint_schema,
+      std::array<std::uint32_t, 3> joint_offsets, std::vector<std::uint32_t> assembly_order,
+      std::unordered_map<std::uint32_t, std::uint32_t> main_members,
+      AssemblyMembers assembly_members, std::vector<PourMembership> pour_memberships,
+      std::vector<RebarSpliceConnection> rebar_splices, std::size_t batch_size)
       : storage_(std::move(storage)),
         objects_(std::move(objects)),
         endpoints_(std::move(endpoints)),
@@ -447,6 +452,7 @@ class SemanticRelationReader final : public BatchReader {
         main_members_(std::move(main_members)),
         assembly_members_(std::move(assembly_members)),
         pour_memberships_(std::move(pour_memberships)),
+        rebar_splices_(std::move(rebar_splices)),
         batch_size_(batch_size) {
     batch_.reserve(batch_size_);
     subelements_.reserve(objects_.size());
@@ -466,6 +472,8 @@ class SemanticRelationReader final : public BatchReader {
         emit_assembly_memberships();
       } else if (phase_ == Phase::pours) {
         emit_pour_memberships();
+      } else if (phase_ == Phase::rebar_splices) {
+        emit_rebar_splice_connections();
       } else {
         auto emitted = emit_component_connections();
         if (!emitted) return Result<BatchView>::failure(emitted.error());
@@ -484,6 +492,7 @@ class SemanticRelationReader final : public BatchReader {
     stored_relations,
     assemblies,
     pours,
+    rebar_splices,
     component_connections,
     done,
   };
@@ -548,8 +557,10 @@ class SemanticRelationReader final : public BatchReader {
     return true;
   }
 
-  bool append_connects_to(std::uint32_t primary, std::uint32_t secondary,
-                          std::uint32_t joint_id) {
+  bool append_connects_to(
+      std::uint32_t primary, std::uint32_t secondary, std::uint32_t source_relation_id,
+      SemanticRelationOrigin origin = SemanticRelationOrigin::component_connection,
+      std::uint32_t ordinal = 0U) {
     if (!valid_edge(primary, secondary) || !connections_.insert({primary, secondary}).second) {
       return false;
     }
@@ -557,9 +568,9 @@ class SemanticRelationReader final : public BatchReader {
         .kind = SemanticRelationKind::connects_to,
         .source_id = primary,
         .target_id = secondary,
-        .ordinal = 0U,
-        .origin = SemanticRelationOrigin::component_connection,
-        .source_relation_id = joint_id,
+        .ordinal = ordinal,
+        .origin = origin,
+        .source_relation_id = source_relation_id,
     });
     return true;
   }
@@ -655,6 +666,25 @@ class SemanticRelationReader final : public BatchReader {
       });
     }
     if (pour_membership_offset_ == pour_memberships_.size()) {
+      phase_ = Phase::rebar_splices;
+    }
+  }
+
+  void emit_rebar_splice_connections() {
+    while (rebar_splice_offset_ < rebar_splices_.size() && batch_.size() < batch_size_) {
+      const auto& splice = rebar_splices_[rebar_splice_offset_];
+      if (next_splice_endpoint_ == 0U) {
+        append_connects_to(splice.splice_id, splice.first_reinforcement_id, 0U,
+                           SemanticRelationOrigin::rebar_splice, 0U);
+        next_splice_endpoint_ = 1U;
+        if (batch_.size() == batch_size_) return;
+      }
+      append_connects_to(splice.splice_id, splice.second_reinforcement_id, 0U,
+                         SemanticRelationOrigin::rebar_splice, 1U);
+      next_splice_endpoint_ = 0U;
+      ++rebar_splice_offset_;
+    }
+    if (rebar_splice_offset_ == rebar_splices_.size()) {
       phase_ = Phase::component_connections;
     }
   }
@@ -673,8 +703,7 @@ class SemanticRelationReader final : public BatchReader {
       }
       if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
       const auto tuple = record.subspan(1U, joint_schema_->tuple_size);
-      append_connects_to(read_u32(tuple, joint_offsets_[1]),
-                         read_u32(tuple, joint_offsets_[2]),
+      append_connects_to(read_u32(tuple, joint_offsets_[1]), read_u32(tuple, joint_offsets_[2]),
                          read_u32(tuple, joint_offsets_[0]));
     }
     if (joint_row_ == joint_layout_->info.row_count) phase_ = Phase::done;
@@ -694,6 +723,7 @@ class SemanticRelationReader final : public BatchReader {
   std::unordered_map<std::uint32_t, std::uint32_t> main_members_;
   AssemblyMembers assembly_members_;
   std::vector<PourMembership> pour_memberships_;
+  std::vector<RebarSpliceConnection> rebar_splices_;
   std::unordered_set<SemanticEdgeKey, SemanticEdgeKeyHash> subelements_;
   std::unordered_set<SemanticEdgeKey, SemanticEdgeKeyHash> hosted_;
   std::unordered_set<SemanticEdgeKey, SemanticEdgeKeyHash> connections_;
@@ -706,7 +736,9 @@ class SemanticRelationReader final : public BatchReader {
   std::uint64_t joint_row_ = 0U;
   std::size_t assembly_offset_ = 0U;
   std::size_t pour_membership_offset_ = 0U;
+  std::size_t rebar_splice_offset_ = 0U;
   std::size_t member_offset_ = 0U;
+  std::uint32_t next_splice_endpoint_ = 0U;
   std::uint32_t next_member_ordinal_ = 1U;
   bool assembly_initialized_ = false;
   std::vector<SemanticRelationView> batch_;
@@ -1561,6 +1593,84 @@ class PourUnitSemanticReader final : public BatchReader {
   std::vector<PropertyView> properties_;
 };
 
+struct RebarSpliceOffsets {
+  std::uint32_t id = 0U;
+  std::uint32_t end1 = 0U;
+  std::uint32_t end2 = 0U;
+  std::uint32_t type = 0U;
+  std::uint32_t lap_length = 0U;
+  std::uint32_t offset = 0U;
+  std::uint32_t clearance = 0U;
+  std::uint32_t position = 0U;
+};
+
+class RebarSpliceSemanticReader final : public BatchReader {
+ public:
+  RebarSpliceSemanticReader(std::shared_ptr<const ModelStorage> storage, const TableLayout& splices,
+                            const TableSchema& schema, RebarSpliceOffsets offsets,
+                            std::size_t splice_batch_size)
+      : storage_(std::move(storage)),
+        splices_(&splices),
+        schema_(&schema),
+        offsets_(offsets),
+        splice_batch_size_(splice_batch_size) {
+    properties_.reserve(splice_batch_size_ * 7U);
+  }
+
+  Result<BatchView> next() override {
+    if (row_ >= splices_->info.row_count) {
+      return Result<BatchView>::success(BatchView{.kind = BatchKind::end});
+    }
+    properties_.clear();
+    const auto payload = storage_->payload.bytes();
+    std::size_t splice_count = 0U;
+    while (row_ < splices_->info.row_count && splice_count < splice_batch_size_) {
+      const auto record = splices_->record(payload, row_++);
+      if (record.empty()) {
+        return Result<BatchView>::failure(
+            {ErrorCode::invalid_container, "A rebar-splice record lies outside the payload."});
+      }
+      if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+      const auto tuple = record.subspan(1U, schema_->tuple_size);
+      const auto object_id = read_u32(tuple, offsets_.id);
+      const auto add_integer = [&](std::string_view name, std::uint32_t value) {
+        properties_.push_back(PropertyView{.object_id = object_id,
+                                           .group = "Tekla",
+                                           .name = name,
+                                           .kind = PropertyValueKind::integer,
+                                           .integer_value = value});
+      };
+      const auto add_floating = [&](std::string_view name, std::uint32_t field_offset) {
+        properties_.push_back(PropertyView{.object_id = object_id,
+                                           .group = "Tekla",
+                                           .name = name,
+                                           .kind = PropertyValueKind::floating,
+                                           .floating_value = read_f64(tuple, field_offset)});
+      };
+      add_integer("spliceType", read_u32(tuple, offsets_.type));
+      add_floating("lapLength", offsets_.lap_length);
+      add_floating("offset", offsets_.offset);
+      add_floating("clearance", offsets_.clearance);
+      add_integer("barPositions", read_u32(tuple, offsets_.position));
+      add_integer("firstEnd", read_u32(tuple, offsets_.end1));
+      add_integer("secondEnd", read_u32(tuple, offsets_.end2));
+      ++splice_count;
+    }
+    if (properties_.empty()) return next();
+    return Result<BatchView>::success(
+        BatchView{.kind = BatchKind::properties, .properties = properties_});
+  }
+
+ private:
+  std::shared_ptr<const ModelStorage> storage_;
+  const TableLayout* splices_ = nullptr;
+  const TableSchema* schema_ = nullptr;
+  RebarSpliceOffsets offsets_;
+  std::size_t splice_batch_size_ = 0U;
+  std::uint64_t row_ = 0U;
+  std::vector<PropertyView> properties_;
+};
+
 class RebarSemanticReader final : public BatchReader {
  public:
   RebarSemanticReader(std::shared_ptr<const ModelStorage> storage, const TableLayout& rebars,
@@ -1872,6 +1982,44 @@ class RebarSemanticReader final : public BatchReader {
   return Result<ProcessStream>::success(std::make_unique<PourUnitSemanticReader>(
       storage, storage->layout.tables[table->ordinal], *table, id->offset, *name,
       batch_size_for(request, 80U)));
+}
+
+[[nodiscard]] Result<ProcessStream> make_rebar_splice_semantic_stream(
+    std::shared_ptr<const ModelStorage> storage, const Schema& schema,
+    const ProcessRequest& request) {
+  const auto* table = schema.find_table("rebar_splice");
+  if (table == nullptr || table->ordinal >= storage->layout.tables.size()) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The rebar-splice table is unavailable."});
+  }
+  const auto* id = find_field(schema, *table, "id");
+  const auto* end1 = find_field(schema, *table, "end1");
+  const auto* end2 = find_field(schema, *table, "end2");
+  const auto* type = find_field(schema, *table, "type");
+  const auto* lap_length = find_field(schema, *table, "laplength");
+  const auto* offset = find_field(schema, *table, "offset");
+  const auto* clearance = find_field(schema, *table, "clearance");
+  const auto* position = find_field(schema, *table, "position");
+  if (id == nullptr || end1 == nullptr || end2 == nullptr || type == nullptr ||
+      lap_length == nullptr || offset == nullptr || clearance == nullptr || position == nullptr ||
+      id->type != FieldType::u32 || end1->type != FieldType::u32 || end2->type != FieldType::u32 ||
+      type->type != FieldType::u32 || lap_length->type != FieldType::f64 ||
+      offset->type != FieldType::f64 || clearance->type != FieldType::f64 ||
+      position->type != FieldType::u32) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The rebar-splice semantic layout is incomplete."});
+  }
+  return Result<ProcessStream>::success(std::make_unique<RebarSpliceSemanticReader>(
+      storage, storage->layout.tables[table->ordinal], *table,
+      RebarSpliceOffsets{.id = id->offset,
+                         .end1 = end1->offset,
+                         .end2 = end2->offset,
+                         .type = type->offset,
+                         .lap_length = lap_length->offset,
+                         .offset = offset->offset,
+                         .clearance = clearance->offset,
+                         .position = position->offset},
+      batch_size_for(request, 512U)));
 }
 
 class ChainedReader final : public BatchReader {
@@ -2232,6 +2380,14 @@ Result<ProcessStream> make_property_stream(std::shared_ptr<const ModelStorage> s
     if (!pour_units) return Result<ProcessStream>::failure(pour_units.error());
     streams.push_back(std::move(pour_units.value()));
   }
+  const auto* rebar_splice_schema = schema.find_table("rebar_splice");
+  if (rebar_splice_schema != nullptr &&
+      rebar_splice_schema->ordinal < storage->layout.tables.size() &&
+      storage->layout.tables[rebar_splice_schema->ordinal].info.row_count != 0U) {
+    auto rebar_splices = make_rebar_splice_semantic_stream(storage, schema, request);
+    if (!rebar_splices) return Result<ProcessStream>::failure(rebar_splices.error());
+    streams.push_back(std::move(rebar_splices.value()));
+  }
   return Result<ProcessStream>::success(std::make_unique<ChainedReader>(std::move(streams)));
 }
 
@@ -2450,11 +2606,58 @@ Result<ProcessStream> make_semantic_relation_stream(std::shared_ptr<const ModelS
                            pour_memberships.end());
   }
 
+  std::vector<RebarSpliceConnection> rebar_splices;
+  const auto* rebar_splice_schema = schema.find_table("rebar_splice");
+  if (rebar_splice_schema != nullptr &&
+      rebar_splice_schema->ordinal < storage->layout.tables.size() &&
+      storage->layout.tables[rebar_splice_schema->ordinal].info.row_count != 0U) {
+    auto id = required_field(schema, *rebar_splice_schema, "id", FieldType::u32);
+    auto first = required_field(schema, *rebar_splice_schema, "rebarid1", FieldType::u32);
+    auto second = required_field(schema, *rebar_splice_schema, "rebarid2", FieldType::u32);
+    if (!id || !first || !second) {
+      return Result<ProcessStream>::failure(!id      ? id.error()
+                                            : !first ? first.error()
+                                                     : second.error());
+    }
+    const auto& layout = storage->layout.tables[rebar_splice_schema->ordinal];
+    rebar_splices.reserve(static_cast<std::size_t>(layout.info.row_count));
+    for (std::uint64_t row = 0U; row < layout.info.row_count; ++row) {
+      const auto record = layout.record(payload, row);
+      if (record.empty()) {
+        return Result<ProcessStream>::failure(
+            {ErrorCode::invalid_container, "A rebar-splice record lies outside the payload."});
+      }
+      if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+      const auto tuple = record.subspan(1U, rebar_splice_schema->tuple_size);
+      const RebarSpliceConnection connection{
+          .splice_id = read_u32(tuple, id.value()->offset),
+          .first_reinforcement_id = read_u32(tuple, first.value()->offset),
+          .second_reinforcement_id = read_u32(tuple, second.value()->offset),
+      };
+      if (connection.splice_id != 0U && connection.first_reinforcement_id != 0U &&
+          connection.second_reinforcement_id != 0U) {
+        rebar_splices.push_back(connection);
+      }
+    }
+    std::ranges::sort(rebar_splices, {}, [](const auto& splice) {
+      return std::tuple{splice.splice_id, splice.first_reinforcement_id,
+                        splice.second_reinforcement_id};
+    });
+    rebar_splices.erase(
+        std::unique(rebar_splices.begin(), rebar_splices.end(),
+                    [](const auto& left, const auto& right) {
+                      return left.splice_id == right.splice_id &&
+                             left.first_reinforcement_id == right.first_reinforcement_id &&
+                             left.second_reinforcement_id == right.second_reinforcement_id;
+                    }),
+        rebar_splices.end());
+  }
+
   return Result<ProcessStream>::success(std::make_unique<SemanticRelationReader>(
       std::move(storage), std::move(objects), std::move(endpoints), relation_layout,
       relation_schema, relation_offsets, joint_layout, joint_schema, joint_offsets,
       std::move(assembly_order), std::move(main_members), std::move(assembly_members),
-      std::move(pour_memberships), batch_size_for(request, 48)));
+      std::move(pour_memberships), std::move(rebar_splices), batch_size_for(request, 48)));
 }
 
 Result<ProcessStream> make_instance_stream(std::shared_ptr<const ModelStorage> storage,

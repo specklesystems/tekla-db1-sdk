@@ -201,6 +201,7 @@ enum class ObjectKind {
   single_rebar,
   rebar_group,
   rebar_mesh,
+  rebar_splice,
   assembly,
   surface_treatment,
   pour_object,
@@ -290,6 +291,7 @@ enum class SemanticRelationOrigin {
   assembly_membership,
   component_connection,
   rebar_host,
+  rebar_splice,
   pour_membership,
 };
 

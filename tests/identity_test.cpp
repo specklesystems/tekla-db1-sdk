@@ -1413,6 +1413,95 @@ std::vector<std::byte> database_with_pour_objects() {
   return bytes;
 }
 
+void append_rebar_splice_table(std::vector<std::byte>& bytes,
+                               const tekla::db1::detail::Schema& schema,
+                               const tekla::db1::detail::TableSchema& table, bool final) {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
+                                                  std::byte{0x00}};
+  append_u32(bytes, table.tuple_size);
+  append_u32(bytes, table.descriptor_count);
+  for (const auto descriptor : schema.table_descriptors(table)) append_u32(bytes, descriptor);
+
+  std::uint32_t row_number = 0U;
+  const auto append_tuple = [&](const auto& write) {
+    bytes.push_back(std::byte{0});
+    const auto tuple_offset = bytes.size();
+    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+    write(tuple);
+    append_u32(bytes, 70'000U + row_number);
+    append_u32(bytes, 80'000U + row_number);
+    ++row_number;
+  };
+
+  if (table.name == "object") {
+    const auto append_object = [&](std::uint32_t id, std::uint32_t type, std::uint32_t subtype,
+                                   std::uint8_t guid_seed) {
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "type") write_u32(tuple, field.offset, type);
+          if (field.name == "subtype") write_u32(tuple, field.offset, subtype);
+          if (field.name == "guid") {
+            for (std::size_t index = 0; index < field.size; ++index) {
+              tuple[field.offset + index] =
+                  static_cast<std::byte>(guid_seed + static_cast<std::uint8_t>(index));
+            }
+          }
+        }
+      });
+    };
+    append_object(1501U, 74U, 0U, 0x20U);
+    append_object(1502U, 16U, 1U, 0x40U);
+    append_object(1503U, 16U, 1U, 0x60U);
+  } else if (table.name == "rebar_splice") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1501U);
+        if (field.name == "rebarid1") write_u32(tuple, field.offset, 1502U);
+        if (field.name == "rebarid2") write_u32(tuple, field.offset, 1503U);
+        if (field.name == "end1") write_u32(tuple, field.offset, 1U);
+        if (field.name == "end2") write_u32(tuple, field.offset, 0U);
+        if (field.name == "type") write_u32(tuple, field.offset, 2U);
+        if (field.name == "laplength") write_f64(tuple, field.offset, 600.0);
+        if (field.name == "offset") write_f64(tuple, field.offset, 12.5);
+        if (field.name == "clearance") write_f64(tuple, field.offset, 8.0);
+        if (field.name == "position") write_u32(tuple, field.offset, 1U);
+      }
+    });
+  }
+
+  bytes.push_back(std::byte{0});
+  bytes.insert(bytes.end(), final ? final_footer.begin() : table_end.begin(),
+               final ? final_footer.end() : table_end.end());
+}
+
+std::vector<std::byte> database_with_rebar_splice() {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::string_view format = "9.66";
+  const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
+  CHECK(schema != nullptr, "the rebar-splice fixture schema is registered");
+  std::vector<std::byte> bytes;
+  append_ascii(bytes, "Xsteel");
+  bytes.push_back(std::byte{0x85});
+  bytes.push_back(std::byte{' '});
+  bytes.insert(bytes.end(), reinterpret_cast<const std::byte*>(format.data()),
+               reinterpret_cast<const std::byte*>(format.data() + format.size()));
+  append_ascii(bytes, " 7d72d8c9-0250-4f3a-8760-bcef517f016e");
+  append_u32(bytes, 1U);
+  bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  if (schema != nullptr) {
+    for (std::size_t index = 0U; index < schema->tables.size(); ++index) {
+      append_rebar_splice_table(bytes, *schema, schema->tables[index],
+                                index + 1U == schema->tables.size());
+    }
+  }
+  return bytes;
+}
+
 std::vector<std::byte> database_with_relationship_semantics(std::string_view format) {
   return database_with_one_object("200*10", "14", format, false, 7U, false, false, false, false,
                                   false, false, false, false, false, false, false, false, false,
@@ -2371,6 +2460,71 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     CHECK(saw_number && saw_type && saw_mixture && saw_unit_name,
           "pour objects and units expose their persisted exchange semantics");
     CHECK(saw_membership, "a pour object is linked to its persisted pour unit");
+  }
+
+  const auto splice_bytes = database_with_rebar_splice();
+  ModelPackage splice_package;
+  splice_package.add(Asset::copy(AssetRole::model_database, "splice.db1", splice_bytes));
+  auto splice_model = open(std::move(splice_package));
+  CHECK(splice_model.has_value(), "a persisted rebar-splice database opens");
+  if (splice_model) {
+    ProcessRequest request;
+    request.stages = Stage::identities | Stage::properties | Stage::semantic_relations;
+    request.batch_memory_budget_bytes = sizeof(SemanticRelationView);
+    auto processed = splice_model.value().process(request);
+    CHECK(processed.has_value(), "rebar-splice semantic processing is available");
+    bool saw_identity = false;
+    bool saw_type = false;
+    bool saw_lap = false;
+    bool saw_offset = false;
+    bool saw_clearance = false;
+    bool saw_position = false;
+    bool saw_first_end = false;
+    bool saw_second_end = false;
+    bool saw_first_group = false;
+    bool saw_second_group = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "rebar-splice batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& object : batch.value().objects) {
+          saw_identity |= object.internal_id == 1501U && object.kind == ObjectKind::rebar_splice;
+        }
+        for (const auto& property : batch.value().properties) {
+          saw_type |= property.object_id == 1501U && property.name == "spliceType" &&
+                      property.integer_value == 2;
+          saw_lap |= property.object_id == 1501U && property.name == "lapLength" &&
+                     property.floating_value == 600.0;
+          saw_offset |= property.object_id == 1501U && property.name == "offset" &&
+                        property.floating_value == 12.5;
+          saw_clearance |= property.object_id == 1501U && property.name == "clearance" &&
+                           property.floating_value == 8.0;
+          saw_position |= property.object_id == 1501U && property.name == "barPositions" &&
+                          property.integer_value == 1;
+          saw_first_end |= property.object_id == 1501U && property.name == "firstEnd" &&
+                           property.integer_value == 1;
+          saw_second_end |= property.object_id == 1501U && property.name == "secondEnd" &&
+                            property.integer_value == 0;
+        }
+        for (const auto& relation : batch.value().semantic_relations) {
+          saw_first_group |= relation.kind == SemanticRelationKind::connects_to &&
+                             relation.source_id == 1501U && relation.target_id == 1502U &&
+                             relation.ordinal == 0U &&
+                             relation.origin == SemanticRelationOrigin::rebar_splice;
+          saw_second_group |= relation.kind == SemanticRelationKind::connects_to &&
+                              relation.source_id == 1501U && relation.target_id == 1503U &&
+                              relation.ordinal == 1U &&
+                              relation.origin == SemanticRelationOrigin::rebar_splice;
+        }
+      }
+    }
+    CHECK(saw_identity, "persisted type-74 rows have stable rebar-splice identities");
+    CHECK(saw_type && saw_lap && saw_offset && saw_clearance && saw_position && saw_first_end &&
+              saw_second_end,
+          "rebar splices expose their persisted connection semantics");
+    CHECK(saw_first_group && saw_second_group,
+          "a rebar splice connects to both persisted reinforcement endpoints");
   }
 
   const auto parallel_leg_weld_bytes = database_with_polygon_weld_geometry(

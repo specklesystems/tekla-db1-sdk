@@ -8,6 +8,9 @@ compatibility policy in the support matrix.
 
 ### Added
 
+- Persisted rebar splices expose stable identities, splice dimensions and
+  endpoint semantics, plus deterministic connections to both reinforcement
+  objects.
 - Persisted pour objects and pour units expose stable identities, stored class,
   phase, number, type, concrete-mixture, and unit-name properties, plus
   deterministic pour-object-to-unit membership relationships. Their visible
