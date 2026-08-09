@@ -1320,6 +1320,99 @@ std::vector<std::byte> database_with_surface_treatment() {
   return bytes;
 }
 
+void append_pour_table(std::vector<std::byte>& bytes, const tekla::db1::detail::Schema& schema,
+                       const tekla::db1::detail::TableSchema& table, bool final) {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
+                                                  std::byte{0x00}};
+  append_u32(bytes, table.tuple_size);
+  append_u32(bytes, table.descriptor_count);
+  for (const auto descriptor : schema.table_descriptors(table)) append_u32(bytes, descriptor);
+
+  std::uint32_t row_number = 0U;
+  const auto append_tuple = [&](const auto& write) {
+    bytes.push_back(std::byte{0});
+    const auto tuple_offset = bytes.size();
+    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+    write(tuple);
+    append_u32(bytes, 50'000U + row_number);
+    append_u32(bytes, 60'000U + row_number);
+    ++row_number;
+  };
+
+  if (table.name == "object") {
+    const auto append_object = [&](std::uint32_t id, std::uint32_t type, std::uint32_t subtype,
+                                   std::uint8_t guid_seed) {
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "type") write_u32(tuple, field.offset, type);
+          if (field.name == "subtype") write_u32(tuple, field.offset, subtype);
+          if (field.name == "guid") {
+            for (std::size_t index = 0; index < field.size; ++index) {
+              tuple[field.offset + index] =
+                  static_cast<std::byte>(guid_seed + static_cast<std::uint8_t>(index));
+            }
+          }
+        }
+      });
+    };
+    append_object(1401U, 90U, 0U, 0x30U);
+    append_object(1402U, 101U, 0U, 0x50U);
+    append_object(1403U, 90U, 1U, 0x70U);
+  } else if (table.name == "pour_object") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1401U);
+        if (field.name == "obj_class") write_u32(tuple, field.offset, 7U);
+        if (field.name == "pour_phase") write_u32(tuple, field.offset, 12U);
+        if (field.name == "pour_unit_id") write_u32(tuple, field.offset, 1402U);
+        if (field.name == "pour_number") write_fixed(tuple, field.offset, field.size, "POUR-42");
+        if (field.name == "pour_type") write_fixed(tuple, field.offset, field.size, "Bridge deck");
+        if (field.name == "concrete_mixture")
+          write_fixed(tuple, field.offset, field.size, "C35/45");
+      }
+    });
+  } else if (table.name == "pour_unit") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1402U);
+        if (field.name == "pour_id") write_u32(tuple, field.offset, 1401U);
+        if (field.name == "name") write_fixed(tuple, field.offset, field.size, "Deck pour unit");
+      }
+    });
+  }
+
+  bytes.push_back(std::byte{0});
+  bytes.insert(bytes.end(), final ? final_footer.begin() : table_end.begin(),
+               final ? final_footer.end() : table_end.end());
+}
+
+std::vector<std::byte> database_with_pour_objects() {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::string_view format = "9.66";
+  const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
+  CHECK(schema != nullptr, "the pour fixture schema is registered");
+  std::vector<std::byte> bytes;
+  append_ascii(bytes, "Xsteel");
+  bytes.push_back(std::byte{0x85});
+  bytes.push_back(std::byte{' '});
+  bytes.insert(bytes.end(), reinterpret_cast<const std::byte*>(format.data()),
+               reinterpret_cast<const std::byte*>(format.data() + format.size()));
+  append_ascii(bytes, " 7d72d8c9-0250-4f3a-8760-bcef517f016e");
+  append_u32(bytes, 1U);
+  bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  if (schema != nullptr) {
+    for (std::size_t index = 0U; index < schema->tables.size(); ++index) {
+      append_pour_table(bytes, *schema, schema->tables[index], index + 1U == schema->tables.size());
+    }
+  }
+  return bytes;
+}
+
 std::vector<std::byte> database_with_relationship_semantics(std::string_view format) {
   return database_with_one_object("200*10", "14", format, false, 7U, false, false, false, false,
                                   false, false, false, false, false, false, false, false, false,
@@ -2224,6 +2317,60 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     }
     CHECK(saw_local_mesh,
           "surface treatments expose reusable local geometry with a rigid model placement");
+  }
+
+  const auto pour_bytes = database_with_pour_objects();
+  ModelPackage pour_package;
+  pour_package.add(Asset::copy(AssetRole::model_database, "pours.db1", pour_bytes));
+  auto pour_model = open(std::move(pour_package));
+  CHECK(pour_model.has_value(), "a persisted pour-object database opens");
+  if (pour_model) {
+    ProcessRequest request;
+    request.stages = Stage::identities | Stage::properties | Stage::semantic_relations;
+    auto processed = pour_model.value().process(request);
+    CHECK(processed.has_value(), "pour object and unit processing is available");
+    bool saw_pour_object = false;
+    bool saw_pour_unit = false;
+    bool saw_unrelated_subtype = false;
+    bool saw_number = false;
+    bool saw_type = false;
+    bool saw_mixture = false;
+    bool saw_unit_name = false;
+    bool saw_membership = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "pour batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& object : batch.value().objects) {
+          saw_pour_object |= object.internal_id == 1401U && object.kind == ObjectKind::pour_object;
+          saw_pour_unit |= object.internal_id == 1402U && object.kind == ObjectKind::pour_unit;
+          saw_unrelated_subtype |=
+              object.internal_id == 1403U && object.kind == ObjectKind::unknown;
+        }
+        for (const auto& property : batch.value().properties) {
+          saw_number |= property.object_id == 1401U && property.name == "pourNumber" &&
+                        property.text_value == "POUR-42";
+          saw_type |= property.object_id == 1401U && property.name == "pourType" &&
+                      property.text_value == "Bridge deck";
+          saw_mixture |= property.object_id == 1401U && property.name == "concreteMixture" &&
+                         property.text_value == "C35/45";
+          saw_unit_name |= property.object_id == 1402U && property.name == "name" &&
+                           property.text_value == "Deck pour unit";
+        }
+        for (const auto& relation : batch.value().semantic_relations) {
+          saw_membership |= relation.kind == SemanticRelationKind::in_assembly &&
+                            relation.source_id == 1401U && relation.target_id == 1402U &&
+                            relation.origin == SemanticRelationOrigin::pour_membership;
+        }
+      }
+    }
+    CHECK(saw_pour_object && saw_pour_unit,
+          "persisted type-90 and type-101 rows have stable pour identities");
+    CHECK(saw_unrelated_subtype, "unproven type-90 subtypes remain unclassified");
+    CHECK(saw_number && saw_type && saw_mixture && saw_unit_name,
+          "pour objects and units expose their persisted exchange semantics");
+    CHECK(saw_membership, "a pour object is linked to its persisted pour unit");
   }
 
   const auto parallel_leg_weld_bytes = database_with_polygon_weld_geometry(

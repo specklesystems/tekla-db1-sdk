@@ -166,6 +166,8 @@ ObjectKind object_kind(std::uint32_t type, std::uint32_t subtype) noexcept {
     if (subtype == 6U || subtype == 8U) return ObjectKind::rebar_mesh;
   }
   if (type == 73U && subtype == 3U) return ObjectKind::surface_treatment;
+  if (type == 90U && subtype == 0U) return ObjectKind::pour_object;
+  if (type == 101U && subtype == 0U) return ObjectKind::pour_unit;
   return ObjectKind::unknown;
 }
 

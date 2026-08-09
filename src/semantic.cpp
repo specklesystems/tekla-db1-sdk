@@ -416,19 +416,24 @@ struct SemanticEdgeKeyHash {
 
 using AssemblyMembers = std::unordered_map<std::uint32_t, std::vector<std::uint32_t>>;
 
+struct PourMembership {
+  std::uint32_t pour_object_id = 0U;
+  std::uint32_t pour_unit_id = 0U;
+};
+
 class SemanticRelationReader final : public BatchReader {
  public:
   SemanticRelationReader(std::shared_ptr<const ModelStorage> storage,
                          std::vector<SemanticObject> objects,
                          std::unordered_set<std::uint32_t> endpoints,
-                         const TableLayout* relation_layout,
-                         const TableSchema* relation_schema,
+                         const TableLayout* relation_layout, const TableSchema* relation_schema,
                          std::array<std::uint32_t, 4> relation_offsets,
                          const TableLayout* joint_layout, const TableSchema* joint_schema,
                          std::array<std::uint32_t, 3> joint_offsets,
                          std::vector<std::uint32_t> assembly_order,
                          std::unordered_map<std::uint32_t, std::uint32_t> main_members,
-                         AssemblyMembers assembly_members, std::size_t batch_size)
+                         AssemblyMembers assembly_members,
+                         std::vector<PourMembership> pour_memberships, std::size_t batch_size)
       : storage_(std::move(storage)),
         objects_(std::move(objects)),
         endpoints_(std::move(endpoints)),
@@ -441,6 +446,7 @@ class SemanticRelationReader final : public BatchReader {
         assembly_order_(std::move(assembly_order)),
         main_members_(std::move(main_members)),
         assembly_members_(std::move(assembly_members)),
+        pour_memberships_(std::move(pour_memberships)),
         batch_size_(batch_size) {
     batch_.reserve(batch_size_);
     subelements_.reserve(objects_.size());
@@ -458,6 +464,8 @@ class SemanticRelationReader final : public BatchReader {
         if (!emitted) return Result<BatchView>::failure(emitted.error());
       } else if (phase_ == Phase::assemblies) {
         emit_assembly_memberships();
+      } else if (phase_ == Phase::pours) {
+        emit_pour_memberships();
       } else {
         auto emitted = emit_component_connections();
         if (!emitted) return Result<BatchView>::failure(emitted.error());
@@ -475,6 +483,7 @@ class SemanticRelationReader final : public BatchReader {
     parents,
     stored_relations,
     assemblies,
+    pours,
     component_connections,
     done,
   };
@@ -630,7 +639,24 @@ class SemanticRelationReader final : public BatchReader {
       next_member_ordinal_ = 1U;
       assembly_initialized_ = false;
     }
-    if (assembly_offset_ == assembly_order_.size()) phase_ = Phase::component_connections;
+    if (assembly_offset_ == assembly_order_.size()) phase_ = Phase::pours;
+  }
+
+  void emit_pour_memberships() {
+    while (pour_membership_offset_ < pour_memberships_.size() && batch_.size() < batch_size_) {
+      const auto& membership = pour_memberships_[pour_membership_offset_++];
+      if (!valid_edge(membership.pour_object_id, membership.pour_unit_id)) continue;
+      batch_.push_back(SemanticRelationView{
+          .kind = SemanticRelationKind::in_assembly,
+          .source_id = membership.pour_object_id,
+          .target_id = membership.pour_unit_id,
+          .ordinal = 0U,
+          .origin = SemanticRelationOrigin::pour_membership,
+      });
+    }
+    if (pour_membership_offset_ == pour_memberships_.size()) {
+      phase_ = Phase::component_connections;
+    }
   }
 
   Result<bool> emit_component_connections() {
@@ -667,6 +693,7 @@ class SemanticRelationReader final : public BatchReader {
   std::vector<std::uint32_t> assembly_order_;
   std::unordered_map<std::uint32_t, std::uint32_t> main_members_;
   AssemblyMembers assembly_members_;
+  std::vector<PourMembership> pour_memberships_;
   std::unordered_set<SemanticEdgeKey, SemanticEdgeKeyHash> subelements_;
   std::unordered_set<SemanticEdgeKey, SemanticEdgeKeyHash> hosted_;
   std::unordered_set<SemanticEdgeKey, SemanticEdgeKeyHash> connections_;
@@ -678,6 +705,7 @@ class SemanticRelationReader final : public BatchReader {
   std::uint64_t relation_row_ = 0U;
   std::uint64_t joint_row_ = 0U;
   std::size_t assembly_offset_ = 0U;
+  std::size_t pour_membership_offset_ = 0U;
   std::size_t member_offset_ = 0U;
   std::uint32_t next_member_ordinal_ = 1U;
   bool assembly_initialized_ = false;
@@ -1399,6 +1427,140 @@ class SurfaceTreatmentSemanticReader final : public BatchReader {
   std::vector<MaterialView> materials_;
 };
 
+struct PourObjectOffsets {
+  std::uint32_t id = 0U;
+  std::uint32_t object_class = 0U;
+  std::uint32_t pour_phase = 0U;
+  const FieldSchema* pour_number = nullptr;
+  const FieldSchema* pour_type = nullptr;
+  const FieldSchema* concrete_mixture = nullptr;
+};
+
+class PourObjectSemanticReader final : public BatchReader {
+ public:
+  PourObjectSemanticReader(std::shared_ptr<const ModelStorage> storage, const TableLayout& objects,
+                           const TableSchema& schema, PourObjectOffsets offsets,
+                           std::size_t object_batch_size)
+      : storage_(std::move(storage)),
+        objects_(&objects),
+        schema_(&schema),
+        offsets_(offsets),
+        object_batch_size_(object_batch_size) {
+    properties_.reserve(object_batch_size_ * 5U);
+  }
+
+  Result<BatchView> next() override {
+    const auto payload = storage_->payload.bytes();
+    while (row_ < objects_->info.row_count) {
+      properties_.clear();
+      std::size_t object_count = 0U;
+      while (row_ < objects_->info.row_count && object_count < object_batch_size_) {
+        const auto record = objects_->record(payload, row_++);
+        if (record.empty()) {
+          return Result<BatchView>::failure(
+              {ErrorCode::invalid_container, "A pour-object record lies outside the payload."});
+        }
+        if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+        const auto tuple = record.subspan(1U, schema_->tuple_size);
+        const auto object_id = read_u32(tuple, offsets_.id);
+        const auto add_integer = [&](std::string_view name, std::uint32_t value) {
+          properties_.push_back(PropertyView{.object_id = object_id,
+                                             .group = "Tekla",
+                                             .name = name,
+                                             .kind = PropertyValueKind::integer,
+                                             .integer_value = value});
+        };
+        const auto add_text = [&](std::string_view name, const FieldSchema& field) {
+          const auto value = read_text(tuple, field.offset, field.size);
+          if (!value.empty()) {
+            properties_.push_back(PropertyView{.object_id = object_id,
+                                               .group = "Tekla",
+                                               .name = name,
+                                               .kind = PropertyValueKind::text,
+                                               .text_value = value});
+          }
+        };
+        add_integer("class", read_u32(tuple, offsets_.object_class));
+        add_integer("pourPhase", read_u32(tuple, offsets_.pour_phase));
+        add_text("pourNumber", *offsets_.pour_number);
+        add_text("pourType", *offsets_.pour_type);
+        add_text("concreteMixture", *offsets_.concrete_mixture);
+        ++object_count;
+      }
+      if (!properties_.empty()) {
+        return Result<BatchView>::success(
+            BatchView{.kind = BatchKind::properties, .properties = properties_});
+      }
+    }
+    return Result<BatchView>::success(BatchView{.kind = BatchKind::end});
+  }
+
+ private:
+  std::shared_ptr<const ModelStorage> storage_;
+  const TableLayout* objects_ = nullptr;
+  const TableSchema* schema_ = nullptr;
+  PourObjectOffsets offsets_;
+  std::size_t object_batch_size_ = 0U;
+  std::uint64_t row_ = 0U;
+  std::vector<PropertyView> properties_;
+};
+
+class PourUnitSemanticReader final : public BatchReader {
+ public:
+  PourUnitSemanticReader(std::shared_ptr<const ModelStorage> storage, const TableLayout& units,
+                         const TableSchema& schema, std::uint32_t id_offset,
+                         const FieldSchema& name_field, std::size_t unit_batch_size)
+      : storage_(std::move(storage)),
+        units_(&units),
+        schema_(&schema),
+        id_offset_(id_offset),
+        name_field_(&name_field),
+        unit_batch_size_(unit_batch_size) {
+    properties_.reserve(unit_batch_size_);
+  }
+
+  Result<BatchView> next() override {
+    const auto payload = storage_->payload.bytes();
+    while (row_ < units_->info.row_count) {
+      properties_.clear();
+      std::size_t unit_count = 0U;
+      while (row_ < units_->info.row_count && unit_count < unit_batch_size_) {
+        const auto record = units_->record(payload, row_++);
+        if (record.empty()) {
+          return Result<BatchView>::failure(
+              {ErrorCode::invalid_container, "A pour-unit record lies outside the payload."});
+        }
+        if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+        const auto tuple = record.subspan(1U, schema_->tuple_size);
+        const auto name = read_text(tuple, name_field_->offset, name_field_->size);
+        if (!name.empty()) {
+          properties_.push_back(PropertyView{.object_id = read_u32(tuple, id_offset_),
+                                             .group = "Tekla",
+                                             .name = "name",
+                                             .kind = PropertyValueKind::text,
+                                             .text_value = name});
+        }
+        ++unit_count;
+      }
+      if (!properties_.empty()) {
+        return Result<BatchView>::success(
+            BatchView{.kind = BatchKind::properties, .properties = properties_});
+      }
+    }
+    return Result<BatchView>::success(BatchView{.kind = BatchKind::end});
+  }
+
+ private:
+  std::shared_ptr<const ModelStorage> storage_;
+  const TableLayout* units_ = nullptr;
+  const TableSchema* schema_ = nullptr;
+  std::uint32_t id_offset_ = 0U;
+  const FieldSchema* name_field_ = nullptr;
+  std::size_t unit_batch_size_ = 0U;
+  std::uint64_t row_ = 0U;
+  std::vector<PropertyView> properties_;
+};
+
 class RebarSemanticReader final : public BatchReader {
  public:
   RebarSemanticReader(std::shared_ptr<const ModelStorage> storage, const TableLayout& rebars,
@@ -1657,6 +1819,59 @@ class RebarSemanticReader final : public BatchReader {
   return Result<ProcessStream>::success(std::make_unique<SurfaceTreatmentSemanticReader>(
       storage, storage->layout.tables[surfaces->ordinal], *surfaces, id->offset,
       attribute_id->offset, std::move(decoded), batch_size_for(request, 512U)));
+}
+
+[[nodiscard]] Result<ProcessStream> make_pour_object_semantic_stream(
+    std::shared_ptr<const ModelStorage> storage, const Schema& schema,
+    const ProcessRequest& request) {
+  const auto* table = schema.find_table("pour_object");
+  if (table == nullptr || table->ordinal >= storage->layout.tables.size()) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The pour-object table is unavailable."});
+  }
+  const auto* id = find_field(schema, *table, "id");
+  const auto* object_class = find_field(schema, *table, "obj_class");
+  const auto* pour_phase = find_field(schema, *table, "pour_phase");
+  const auto* pour_number = find_field(schema, *table, "pour_number");
+  const auto* pour_type = find_field(schema, *table, "pour_type");
+  const auto* concrete_mixture = find_field(schema, *table, "concrete_mixture");
+  if (id == nullptr || object_class == nullptr || pour_phase == nullptr || pour_number == nullptr ||
+      pour_type == nullptr || concrete_mixture == nullptr || id->type != FieldType::u32 ||
+      object_class->type != FieldType::u32 || pour_phase->type != FieldType::u32 ||
+      pour_number->type != FieldType::text || pour_type->type != FieldType::text ||
+      concrete_mixture->type != FieldType::text) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The pour-object semantic layout is incomplete."});
+  }
+  return Result<ProcessStream>::success(std::make_unique<PourObjectSemanticReader>(
+      storage, storage->layout.tables[table->ordinal], *table,
+      PourObjectOffsets{.id = id->offset,
+                        .object_class = object_class->offset,
+                        .pour_phase = pour_phase->offset,
+                        .pour_number = pour_number,
+                        .pour_type = pour_type,
+                        .concrete_mixture = concrete_mixture},
+      batch_size_for(request, 160U)));
+}
+
+[[nodiscard]] Result<ProcessStream> make_pour_unit_semantic_stream(
+    std::shared_ptr<const ModelStorage> storage, const Schema& schema,
+    const ProcessRequest& request) {
+  const auto* table = schema.find_table("pour_unit");
+  if (table == nullptr || table->ordinal >= storage->layout.tables.size()) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The pour-unit table is unavailable."});
+  }
+  const auto* id = find_field(schema, *table, "id");
+  const auto* name = find_field(schema, *table, "name");
+  if (id == nullptr || name == nullptr || id->type != FieldType::u32 ||
+      name->type != FieldType::text) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The pour-unit semantic layout is incomplete."});
+  }
+  return Result<ProcessStream>::success(std::make_unique<PourUnitSemanticReader>(
+      storage, storage->layout.tables[table->ordinal], *table, id->offset, *name,
+      batch_size_for(request, 80U)));
 }
 
 class ChainedReader final : public BatchReader {
@@ -2002,6 +2217,21 @@ Result<ProcessStream> make_property_stream(std::shared_ptr<const ModelStorage> s
     if (!surfaces) return Result<ProcessStream>::failure(surfaces.error());
     streams.push_back(std::move(surfaces.value()));
   }
+  const auto* pour_object_schema = schema.find_table("pour_object");
+  if (pour_object_schema != nullptr &&
+      pour_object_schema->ordinal < storage->layout.tables.size() &&
+      storage->layout.tables[pour_object_schema->ordinal].info.row_count != 0U) {
+    auto pour_objects = make_pour_object_semantic_stream(storage, schema, request);
+    if (!pour_objects) return Result<ProcessStream>::failure(pour_objects.error());
+    streams.push_back(std::move(pour_objects.value()));
+  }
+  const auto* pour_unit_schema = schema.find_table("pour_unit");
+  if (pour_unit_schema != nullptr && pour_unit_schema->ordinal < storage->layout.tables.size() &&
+      storage->layout.tables[pour_unit_schema->ordinal].info.row_count != 0U) {
+    auto pour_units = make_pour_unit_semantic_stream(storage, schema, request);
+    if (!pour_units) return Result<ProcessStream>::failure(pour_units.error());
+    streams.push_back(std::move(pour_units.value()));
+  }
   return Result<ProcessStream>::success(std::make_unique<ChainedReader>(std::move(streams)));
 }
 
@@ -2182,11 +2412,49 @@ Result<ProcessStream> make_semantic_relation_stream(std::shared_ptr<const ModelS
     }
   }
 
+  std::vector<PourMembership> pour_memberships;
+  const auto* pour_object_schema = schema.find_table("pour_object");
+  if (pour_object_schema != nullptr &&
+      pour_object_schema->ordinal < storage->layout.tables.size() &&
+      storage->layout.tables[pour_object_schema->ordinal].info.row_count != 0U) {
+    auto id = required_field(schema, *pour_object_schema, "id", FieldType::u32);
+    auto unit = required_field(schema, *pour_object_schema, "pour_unit_id", FieldType::u32);
+    if (!id || !unit) {
+      return Result<ProcessStream>::failure(!id ? id.error() : unit.error());
+    }
+    const auto& layout = storage->layout.tables[pour_object_schema->ordinal];
+    pour_memberships.reserve(static_cast<std::size_t>(layout.info.row_count));
+    for (std::uint64_t row = 0U; row < layout.info.row_count; ++row) {
+      const auto record = layout.record(payload, row);
+      if (record.empty()) {
+        return Result<ProcessStream>::failure(
+            {ErrorCode::invalid_container, "A pour-object record lies outside the payload."});
+      }
+      if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+      const auto tuple = record.subspan(1U, pour_object_schema->tuple_size);
+      const auto object = read_u32(tuple, id.value()->offset);
+      const auto pour_unit = read_u32(tuple, unit.value()->offset);
+      if (object != 0U && pour_unit != 0U && object != pour_unit) {
+        pour_memberships.push_back(
+            PourMembership{.pour_object_id = object, .pour_unit_id = pour_unit});
+      }
+    }
+    std::ranges::sort(pour_memberships, {}, [](const auto& membership) {
+      return std::pair{membership.pour_unit_id, membership.pour_object_id};
+    });
+    pour_memberships.erase(std::unique(pour_memberships.begin(), pour_memberships.end(),
+                                       [](const auto& left, const auto& right) {
+                                         return left.pour_object_id == right.pour_object_id &&
+                                                left.pour_unit_id == right.pour_unit_id;
+                                       }),
+                           pour_memberships.end());
+  }
+
   return Result<ProcessStream>::success(std::make_unique<SemanticRelationReader>(
       std::move(storage), std::move(objects), std::move(endpoints), relation_layout,
       relation_schema, relation_offsets, joint_layout, joint_schema, joint_offsets,
       std::move(assembly_order), std::move(main_members), std::move(assembly_members),
-      batch_size_for(request, 48)));
+      std::move(pour_memberships), batch_size_for(request, 48)));
 }
 
 Result<ProcessStream> make_instance_stream(std::shared_ptr<const ModelStorage> storage,

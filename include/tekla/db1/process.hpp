@@ -203,6 +203,8 @@ enum class ObjectKind {
   rebar_mesh,
   assembly,
   surface_treatment,
+  pour_object,
+  pour_unit,
 };
 
 // A persisted object can either be an independently meaningful model element
@@ -288,6 +290,7 @@ enum class SemanticRelationOrigin {
   assembly_membership,
   component_connection,
   rebar_host,
+  pour_membership,
 };
 
 // Output-neutral graph semantics reconstructed from persisted DB1 state.

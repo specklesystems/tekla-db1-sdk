@@ -8,6 +8,11 @@ compatibility policy in the support matrix.
 
 ### Added
 
+- Persisted pour objects and pour units expose stable identities, stored class,
+  phase, number, type, concrete-mixture, and unit-name properties, plus
+  deterministic pour-object-to-unit membership relationships. Their visible
+  concrete continues to come from the ordinary member parts; no duplicate pour
+  mesh is synthesized.
 - Persisted type-73 tile surface treatments expose stable identities, native
   name/thickness/material semantics, father-part relationships, and closed
   treatment solids from their stored polygon, placement, and numeric thickness.
