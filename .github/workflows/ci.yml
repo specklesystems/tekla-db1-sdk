@@ -20,14 +20,19 @@ jobs:
       - name: Install Windows development packages
         if: runner.os == 'Windows'
         shell: pwsh
-        run: >-
-          C:\msys64\usr\bin\bash.exe -lc
-          "pacman -S --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib"
+        run: vcpkg install zlib:x64-mingw-static
 
       - name: Configure
+        if: runner.os != 'Windows'
+        run: cmake --preset ci
+
+      - name: Configure Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: >-
           cmake --preset ci
-          ${{ runner.os == 'Windows' && '-DCMAKE_CXX_COMPILER=C:/msys64/mingw64/bin/g++.exe -DZLIB_ROOT=C:/msys64/mingw64' || '' }}
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-mingw-static
 
       - name: Build
         run: cmake --build --preset ci

@@ -2793,11 +2793,12 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
                                         : std::nullopt;
           const auto longitudinal_radius = size_pair ? rebar_radius((*size_pair)[0]) : std::nullopt;
           const auto cross_radius = size_pair ? rebar_radius((*size_pair)[1]) : std::nullopt;
-          const auto longitudinal_spacing =
-              spacing_pair ? positive_number((*spacing_pair)[0]) : std::nullopt;
-          const auto cross_spacing =
-              spacing_pair ? positive_number((*spacing_pair)[1]) : std::nullopt;
-          if (!longitudinal_radius || !cross_radius || !longitudinal_spacing || !cross_spacing ||
+          const double longitudinal_spacing =
+              spacing_pair ? positive_number((*spacing_pair)[0]).value_or(0.0) : 0.0;
+          const double cross_spacing =
+              spacing_pair ? positive_number((*spacing_pair)[1]).value_or(0.0) : 0.0;
+          if (!longitudinal_radius || !cross_radius || longitudinal_spacing <= 0.0 ||
+              cross_spacing <= 0.0 ||
               geometry.status != LinkedDecodeStatus::success ||
               (bending != nullptr &&
                (bending->status != LinkedDecodeStatus::success || bending->value.empty()))) {
@@ -2805,8 +2806,6 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
                                    "Classic rebar-mesh attributes or arrays are invalid."});
             continue;
           }
-          const double longitudinal_spacing_value = longitudinal_spacing.value_or(0.0);
-          const double cross_spacing_value = cross_spacing.value_or(0.0);
           const auto remaining_by_count = expanded_curve_count >= maximum_expanded_curve_count
                                               ? 0U
                                               : maximum_expanded_curve_count - expanded_curve_count;
@@ -2826,10 +2825,10 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
                 vector_length(subtract(distribution_end, distribution_start));
             auto cross_count =
                 regular_distance_count(mesh_attribute->second.longitudinal_overhang_left,
-                                       distribution_length, cross_spacing_value);
+                                       distribution_length, cross_spacing);
             auto longitudinal_count =
                 regular_distance_count(mesh_attribute->second.cross_overhang_left,
-                                       mesh_attribute->second.width, longitudinal_spacing_value);
+                                       mesh_attribute->second.width, longitudinal_spacing);
             if (!cross_count || !longitudinal_count) {
               const auto& error = !cross_count ? cross_count.error() : longitudinal_count.error();
               diagnostics.push_back({error.code, rebar_id, error.message});
@@ -2863,13 +2862,13 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
           Result<MeshCenterlines> evaluated =
               object->second.subtype == 6U
                   ? polygon_mesh_centerlines(
-                        polygon, geometry.value, *longitudinal_spacing, *cross_spacing,
+                        polygon, geometry.value, longitudinal_spacing, cross_spacing,
                         mesh_attribute->second.longitudinal_overhang_left,
                         mesh_attribute->second.cross_overhang_left, *longitudinal_radius,
                         *cross_radius, mesh_attribute->second.flags, remaining_count)
                   : bent_mesh_centerlines(polygon, geometry.value, bending->value.front(),
-                                          mesh_attribute->second.width, *longitudinal_spacing,
-                                          *cross_spacing,
+                                          mesh_attribute->second.width, longitudinal_spacing,
+                                          cross_spacing,
                                           mesh_attribute->second.longitudinal_overhang_left,
                                           mesh_attribute->second.cross_overhang_left,
                                           *longitudinal_radius, *cross_radius, remaining_count);
