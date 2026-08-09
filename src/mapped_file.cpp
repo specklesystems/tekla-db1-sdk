@@ -16,7 +16,9 @@
 #include "archive_budget.hpp"
 
 #if defined(_WIN32)
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <Windows.h>
 #elif defined(__unix__) || defined(__APPLE__)
 #include <fcntl.h>

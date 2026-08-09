@@ -96,6 +96,13 @@ jobs:
           libocct-modeling-algorithms-dev
           libtbb-dev
 
+      - name: Restore matching OCCT package header
+        run: |
+          sudo curl -fsSL \
+            https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/V7_6_3/src/NCollection/NCollection_AliasedArray.hxx \
+            -o /usr/include/opencascade/NCollection_AliasedArray.hxx
+          echo "f3a4f8ec0cb0292ad8538fb5714fdf90149a989fb47e14383a1205a0c4889d59  /usr/include/opencascade/NCollection_AliasedArray.hxx" | sha256sum -c -
+
       - name: Configure OCCT build
         run: cmake --preset occt
 
