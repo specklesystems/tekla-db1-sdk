@@ -2805,8 +2805,8 @@ Result<ProcessStream> make_nonpart_geometry_stream(std::shared_ptr<const ModelSt
                                    "Classic rebar-mesh attributes or arrays are invalid."});
             continue;
           }
-          const double longitudinal_spacing_value = longitudinal_spacing.value();
-          const double cross_spacing_value = cross_spacing.value();
+          const double longitudinal_spacing_value = longitudinal_spacing.value_or(0.0);
+          const double cross_spacing_value = cross_spacing.value_or(0.0);
           const auto remaining_by_count = expanded_curve_count >= maximum_expanded_curve_count
                                               ? 0U
                                               : maximum_expanded_curve_count - expanded_curve_count;

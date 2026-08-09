@@ -27,7 +27,7 @@ jobs:
       - name: Configure
         run: >-
           cmake --preset ci
-          ${{ runner.os == 'Windows' && '-DCMAKE_CXX_COMPILER=C:/msys64/mingw64/bin/g++.exe' || '' }}
+          ${{ runner.os == 'Windows' && '-DCMAKE_CXX_COMPILER=C:/msys64/mingw64/bin/g++.exe -DZLIB_ROOT=C:/msys64/mingw64' || '' }}
 
       - name: Build
         run: cmake --build --preset ci
