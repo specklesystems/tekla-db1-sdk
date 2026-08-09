@@ -13,6 +13,12 @@ function(tekla_db1_set_project_warnings target)
       -Wshadow
       -Wsign-conversion
       -ffp-contract=off)
+    # GCC diagnoses every intentionally omitted aggregate member even when the
+    # member has an in-class default. The SDK uses designated initializers to
+    # select one BatchView payload while the remaining spans stay empty.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      target_compile_options(${target} PRIVATE -Wno-missing-field-initializers)
+    endif()
     if(TEKLA_DB1_WARNINGS_AS_ERRORS)
       target_compile_options(${target} PRIVATE -Werror)
     endif()

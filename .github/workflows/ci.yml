@@ -17,8 +17,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Windows development packages
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          C:\msys64\usr\bin\bash.exe -lc
+          "pacman -S --noconfirm --needed mingw-w64-x86_64-zlib"
+
       - name: Configure
-        run: cmake --preset ci
+        run: >-
+          cmake --preset ci
+          ${{ runner.os == 'Windows' && '-DCMAKE_CXX_COMPILER=C:/msys64/mingw64/bin/g++.exe' || '' }}
 
       - name: Build
         run: cmake --build --preset ci
@@ -80,6 +89,7 @@ jobs:
           libocct-foundation-dev
           libocct-modeling-data-dev
           libocct-modeling-algorithms-dev
+          libtbb-dev
 
       - name: Configure OCCT build
         run: cmake --preset occt
