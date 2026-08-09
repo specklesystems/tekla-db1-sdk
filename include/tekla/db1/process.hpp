@@ -204,6 +204,7 @@ enum class ObjectKind {
   rebar_splice,
   assembly,
   surface_treatment,
+  surface_object,
   pour_object,
   pour_unit,
 };
@@ -293,6 +294,7 @@ enum class SemanticRelationOrigin {
   rebar_host,
   rebar_splice,
   pour_membership,
+  surface_object,
 };
 
 // Output-neutral graph semantics reconstructed from persisted DB1 state.

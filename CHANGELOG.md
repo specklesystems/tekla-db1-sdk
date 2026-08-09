@@ -8,6 +8,8 @@ compatibility policy in the support matrix.
 
 ### Added
 
+- Persisted surface objects expose stable identities, stored surface properties,
+  and deterministic host-part relationships.
 - Persisted rebar splices expose stable identities, splice dimensions and
   endpoint semantics, plus deterministic connections to both reinforcement
   objects.

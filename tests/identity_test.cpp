@@ -1502,6 +1502,100 @@ std::vector<std::byte> database_with_rebar_splice() {
   return bytes;
 }
 
+void append_surface_object_table(std::vector<std::byte>& bytes,
+                                 const tekla::db1::detail::Schema& schema,
+                                 const tekla::db1::detail::TableSchema& table, bool final) {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::array<std::byte, 4> final_footer{std::byte{0x4f}, std::byte{0x61}, std::byte{0xbc},
+                                                  std::byte{0x00}};
+  append_u32(bytes, table.tuple_size);
+  append_u32(bytes, table.descriptor_count);
+  for (const auto descriptor : schema.table_descriptors(table)) append_u32(bytes, descriptor);
+
+  std::uint32_t row_number = 0U;
+  const auto append_tuple = [&](const auto& write) {
+    bytes.push_back(std::byte{0});
+    const auto tuple_offset = bytes.size();
+    bytes.resize(bytes.size() + table.tuple_size, std::byte{0});
+    auto tuple = std::span<std::byte>(bytes).subspan(tuple_offset, table.tuple_size);
+    write(tuple);
+    append_u32(bytes, 90'000U + row_number);
+    append_u32(bytes, 100'000U + row_number);
+    ++row_number;
+  };
+
+  if (table.name == "object") {
+    const auto append_object = [&](std::uint32_t id, std::uint32_t type, std::uint32_t subtype,
+                                   std::uint8_t guid_seed) {
+      append_tuple([&](std::span<std::byte> tuple) {
+        for (const auto& field : schema.table_fields(table)) {
+          if (field.name == "id") write_u32(tuple, field.offset, id);
+          if (field.name == "type") write_u32(tuple, field.offset, type);
+          if (field.name == "subtype") write_u32(tuple, field.offset, subtype);
+          if (field.name == "guid") {
+            for (std::size_t index = 0; index < field.size; ++index) {
+              tuple[field.offset + index] =
+                  static_cast<std::byte>(guid_seed + static_cast<std::uint8_t>(index));
+            }
+          }
+        }
+      });
+    };
+    append_object(1601U, 97U, 1U, 0x10U);
+    append_object(1602U, 2U, 0U, 0x30U);
+  } else if (table.name == "surface_object") {
+    append_tuple([&](std::span<std::byte> tuple) {
+      for (const auto& field : schema.table_fields(table)) {
+        if (field.name == "id") write_u32(tuple, field.offset, 1601U);
+        if (field.name == "obj_class") write_u32(tuple, field.offset, 60U);
+        if (field.name == "name")
+          write_fixed(tuple, field.offset, field.size, "Rebar set leg surface");
+        if (field.name == "group") write_fixed(tuple, field.offset, field.size, "4");
+        if (field.name == "related_part_id") write_u32(tuple, field.offset, 1602U);
+        if (field.name == "geometry_type") write_u32(tuple, field.offset, 2U);
+        if (field.name == "created_from_pour") write_u32(tuple, field.offset, 0U);
+        if (field.name == "length_direction_x") write_f64(tuple, field.offset, 1.0);
+        if (field.name == "length_direction_y") write_f64(tuple, field.offset, 0.0);
+        if (field.name == "length_direction_z") write_f64(tuple, field.offset, 0.0);
+        if (field.name == "layer_number") write_u32(tuple, field.offset, 2U);
+        if (field.name == "offset") write_f64(tuple, field.offset, 12.5);
+        if (field.name == "offset_type") write_u32(tuple, field.offset, 1U);
+        if (field.name == "surface_type")
+          write_fixed(tuple, field.offset, field.size, "Rebar set leg surface");
+      }
+    });
+  }
+
+  bytes.push_back(std::byte{0});
+  bytes.insert(bytes.end(), final ? final_footer.begin() : table_end.begin(),
+               final ? final_footer.end() : table_end.end());
+}
+
+std::vector<std::byte> database_with_surface_object() {
+  constexpr std::array<std::byte, 4> table_end{std::byte{0x66}, std::byte{0xc0}, std::byte{0xce},
+                                               std::byte{0xdb}};
+  constexpr std::string_view format = "9.66";
+  const auto* schema = tekla::db1::detail::schema_for(format, 0x85);
+  CHECK(schema != nullptr, "the surface-object fixture schema is registered");
+  std::vector<std::byte> bytes;
+  append_ascii(bytes, "Xsteel");
+  bytes.push_back(std::byte{0x85});
+  bytes.push_back(std::byte{' '});
+  bytes.insert(bytes.end(), reinterpret_cast<const std::byte*>(format.data()),
+               reinterpret_cast<const std::byte*>(format.data() + format.size()));
+  append_ascii(bytes, " 7d72d8c9-0250-4f3a-8760-bcef517f016e");
+  append_u32(bytes, 1U);
+  bytes.insert(bytes.end(), table_end.begin(), table_end.end());
+  if (schema != nullptr) {
+    for (std::size_t index = 0U; index < schema->tables.size(); ++index) {
+      append_surface_object_table(bytes, *schema, schema->tables[index],
+                                  index + 1U == schema->tables.size());
+    }
+  }
+  return bytes;
+}
+
 std::vector<std::byte> database_with_relationship_semantics(std::string_view format) {
   return database_with_one_object("200*10", "14", format, false, 7U, false, false, false, false,
                                   false, false, false, false, false, false, false, false, false,
@@ -2525,6 +2619,65 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
           "rebar splices expose their persisted connection semantics");
     CHECK(saw_first_group && saw_second_group,
           "a rebar splice connects to both persisted reinforcement endpoints");
+  }
+
+  const auto surface_object_bytes = database_with_surface_object();
+  ModelPackage surface_object_package;
+  surface_object_package.add(
+      Asset::copy(AssetRole::model_database, "surface-object.db1", surface_object_bytes));
+  auto surface_object_model = open(std::move(surface_object_package));
+  CHECK(surface_object_model.has_value(), "a persisted surface-object database opens");
+  if (surface_object_model) {
+    ProcessRequest request;
+    request.stages = Stage::identities | Stage::properties | Stage::semantic_relations;
+    request.batch_memory_budget_bytes = sizeof(PropertyView) * 2U;
+    auto processed = surface_object_model.value().process(request);
+    CHECK(processed.has_value(), "surface-object semantic processing is available");
+    bool saw_identity = false;
+    bool saw_name = false;
+    bool saw_class = false;
+    bool saw_group = false;
+    bool saw_geometry_type = false;
+    bool saw_layer = false;
+    bool saw_offset = false;
+    bool saw_surface_type = false;
+    bool saw_host = false;
+    if (processed) {
+      while (true) {
+        auto batch = processed.value()->next();
+        CHECK(batch.has_value(), "surface-object batches decode");
+        if (!batch || batch.value().kind == BatchKind::end) break;
+        for (const auto& object : batch.value().objects) {
+          saw_identity |= object.internal_id == 1601U && object.kind == ObjectKind::surface_object;
+        }
+        for (const auto& property : batch.value().properties) {
+          saw_name |= property.object_id == 1601U && property.name == "name" &&
+                      property.text_value == "Rebar set leg surface";
+          saw_class |= property.object_id == 1601U && property.name == "class" &&
+                       property.integer_value == 60;
+          saw_group |=
+              property.object_id == 1601U && property.name == "group" && property.text_value == "4";
+          saw_geometry_type |= property.object_id == 1601U && property.name == "geometryType" &&
+                               property.integer_value == 2;
+          saw_layer |= property.object_id == 1601U && property.name == "layerNumber" &&
+                       property.integer_value == 2;
+          saw_offset |= property.object_id == 1601U && property.name == "additionalOffset" &&
+                        property.floating_value == 12.5;
+          saw_surface_type |= property.object_id == 1601U && property.name == "surfaceType" &&
+                              property.text_value == "Rebar set leg surface";
+        }
+        for (const auto& relation : batch.value().semantic_relations) {
+          saw_host |= relation.kind == SemanticRelationKind::hosted_on &&
+                      relation.source_id == 1601U && relation.target_id == 1602U &&
+                      relation.origin == SemanticRelationOrigin::surface_object;
+        }
+      }
+    }
+    CHECK(saw_identity, "persisted type-97 rows have stable surface-object identities");
+    CHECK(saw_name && saw_class && saw_group && saw_geometry_type && saw_layer && saw_offset &&
+              saw_surface_type,
+          "surface objects expose their persisted surface semantics");
+    CHECK(saw_host, "a surface object is linked to its persisted host part");
   }
 
   const auto parallel_leg_weld_bytes = database_with_polygon_weld_geometry(

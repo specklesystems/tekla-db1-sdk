@@ -428,6 +428,13 @@ struct RebarSpliceConnection {
   std::uint32_t second_reinforcement_id = 0U;
 };
 
+struct SurfaceObjectHost {
+  std::uint32_t surface_object_id = 0U;
+  std::uint32_t host_id = 0U;
+
+  friend bool operator==(const SurfaceObjectHost&, const SurfaceObjectHost&) = default;
+};
+
 class SemanticRelationReader final : public BatchReader {
  public:
   SemanticRelationReader(
@@ -438,7 +445,8 @@ class SemanticRelationReader final : public BatchReader {
       std::array<std::uint32_t, 3> joint_offsets, std::vector<std::uint32_t> assembly_order,
       std::unordered_map<std::uint32_t, std::uint32_t> main_members,
       AssemblyMembers assembly_members, std::vector<PourMembership> pour_memberships,
-      std::vector<RebarSpliceConnection> rebar_splices, std::size_t batch_size)
+      std::vector<RebarSpliceConnection> rebar_splices,
+      std::vector<SurfaceObjectHost> surface_objects, std::size_t batch_size)
       : storage_(std::move(storage)),
         objects_(std::move(objects)),
         endpoints_(std::move(endpoints)),
@@ -453,6 +461,7 @@ class SemanticRelationReader final : public BatchReader {
         assembly_members_(std::move(assembly_members)),
         pour_memberships_(std::move(pour_memberships)),
         rebar_splices_(std::move(rebar_splices)),
+        surface_objects_(std::move(surface_objects)),
         batch_size_(batch_size) {
     batch_.reserve(batch_size_);
     subelements_.reserve(objects_.size());
@@ -474,6 +483,8 @@ class SemanticRelationReader final : public BatchReader {
         emit_pour_memberships();
       } else if (phase_ == Phase::rebar_splices) {
         emit_rebar_splice_connections();
+      } else if (phase_ == Phase::surface_objects) {
+        emit_surface_object_hosts();
       } else {
         auto emitted = emit_component_connections();
         if (!emitted) return Result<BatchView>::failure(emitted.error());
@@ -493,6 +504,7 @@ class SemanticRelationReader final : public BatchReader {
     assemblies,
     pours,
     rebar_splices,
+    surface_objects,
     component_connections,
     done,
   };
@@ -685,6 +697,33 @@ class SemanticRelationReader final : public BatchReader {
       ++rebar_splice_offset_;
     }
     if (rebar_splice_offset_ == rebar_splices_.size()) {
+      phase_ = Phase::surface_objects;
+    }
+  }
+
+  void emit_surface_object_hosts() {
+    while (surface_object_offset_ < surface_objects_.size() && batch_.size() < batch_size_) {
+      const auto& object = surface_objects_[surface_object_offset_++];
+      if (!valid_edge(object.surface_object_id, object.host_id) ||
+          !hosted_.insert({object.surface_object_id, object.host_id}).second) {
+        continue;
+      }
+      const auto surface_kind = kinds_.find(object.surface_object_id);
+      const auto host_kind = kinds_.find(object.host_id);
+      if (surface_kind == kinds_.end() || host_kind == kinds_.end() ||
+          surface_kind->second != ObjectKind::surface_object || !is_host(host_kind->second)) {
+        hosted_.erase({object.surface_object_id, object.host_id});
+        continue;
+      }
+      batch_.push_back(SemanticRelationView{
+          .kind = SemanticRelationKind::hosted_on,
+          .source_id = object.surface_object_id,
+          .target_id = object.host_id,
+          .ordinal = 0U,
+          .origin = SemanticRelationOrigin::surface_object,
+      });
+    }
+    if (surface_object_offset_ == surface_objects_.size()) {
       phase_ = Phase::component_connections;
     }
   }
@@ -724,6 +763,7 @@ class SemanticRelationReader final : public BatchReader {
   AssemblyMembers assembly_members_;
   std::vector<PourMembership> pour_memberships_;
   std::vector<RebarSpliceConnection> rebar_splices_;
+  std::vector<SurfaceObjectHost> surface_objects_;
   std::unordered_set<SemanticEdgeKey, SemanticEdgeKeyHash> subelements_;
   std::unordered_set<SemanticEdgeKey, SemanticEdgeKeyHash> hosted_;
   std::unordered_set<SemanticEdgeKey, SemanticEdgeKeyHash> connections_;
@@ -737,6 +777,7 @@ class SemanticRelationReader final : public BatchReader {
   std::size_t assembly_offset_ = 0U;
   std::size_t pour_membership_offset_ = 0U;
   std::size_t rebar_splice_offset_ = 0U;
+  std::size_t surface_object_offset_ = 0U;
   std::size_t member_offset_ = 0U;
   std::uint32_t next_splice_endpoint_ = 0U;
   std::uint32_t next_member_ordinal_ = 1U;
@@ -1459,6 +1500,115 @@ class SurfaceTreatmentSemanticReader final : public BatchReader {
   std::vector<MaterialView> materials_;
 };
 
+struct SurfaceObjectOffsets {
+  std::uint32_t id = 0U;
+  std::uint32_t object_class = 0U;
+  const FieldSchema* name = nullptr;
+  const FieldSchema* group = nullptr;
+  const FieldSchema* geometry_type = nullptr;
+  const FieldSchema* created_from_pour = nullptr;
+  const FieldSchema* length_direction_x = nullptr;
+  const FieldSchema* length_direction_y = nullptr;
+  const FieldSchema* length_direction_z = nullptr;
+  const FieldSchema* layer_number = nullptr;
+  const FieldSchema* additional_offset = nullptr;
+  const FieldSchema* offset_type = nullptr;
+  const FieldSchema* surface_type = nullptr;
+};
+
+class SurfaceObjectSemanticReader final : public BatchReader {
+ public:
+  SurfaceObjectSemanticReader(std::shared_ptr<const ModelStorage> storage,
+                              const TableLayout& objects, const TableSchema& schema,
+                              SurfaceObjectOffsets offsets, std::size_t object_batch_size)
+      : storage_(std::move(storage)),
+        objects_(&objects),
+        schema_(&schema),
+        offsets_(offsets),
+        object_batch_size_(object_batch_size) {
+    properties_.reserve(object_batch_size_ * 12U);
+  }
+
+  Result<BatchView> next() override {
+    const auto payload = storage_->payload.bytes();
+    while (row_ < objects_->info.row_count) {
+      properties_.clear();
+      std::size_t object_count = 0U;
+      while (row_ < objects_->info.row_count && object_count < object_batch_size_) {
+        const auto record = objects_->record(payload, row_++);
+        if (record.empty()) {
+          return Result<BatchView>::failure(
+              {ErrorCode::invalid_container, "A surface-object record lies outside the payload."});
+        }
+        if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+        const auto tuple = record.subspan(1U, schema_->tuple_size);
+        const auto object_id = read_u32(tuple, offsets_.id);
+        const auto add_integer = [&](std::string_view name, const FieldSchema* field) {
+          if (field != nullptr) {
+            properties_.push_back(PropertyView{.object_id = object_id,
+                                               .group = "Tekla",
+                                               .name = name,
+                                               .kind = PropertyValueKind::integer,
+                                               .integer_value = read_u32(tuple, field->offset)});
+          }
+        };
+        const auto add_floating = [&](std::string_view name, const FieldSchema* field) {
+          if (field != nullptr) {
+            properties_.push_back(PropertyView{.object_id = object_id,
+                                               .group = "Tekla",
+                                               .name = name,
+                                               .kind = PropertyValueKind::floating,
+                                               .floating_value = read_f64(tuple, field->offset)});
+          }
+        };
+        const auto add_text = [&](std::string_view name, const FieldSchema* field) {
+          if (field == nullptr) return;
+          const auto value = read_text(tuple, field->offset, field->size);
+          if (!value.empty()) {
+            properties_.push_back(PropertyView{.object_id = object_id,
+                                               .group = "Tekla",
+                                               .name = name,
+                                               .kind = PropertyValueKind::text,
+                                               .text_value = value});
+          }
+        };
+        properties_.push_back(
+            PropertyView{.object_id = object_id,
+                         .group = "Tekla",
+                         .name = "class",
+                         .kind = PropertyValueKind::integer,
+                         .integer_value = read_u32(tuple, offsets_.object_class)});
+        add_text("name", offsets_.name);
+        add_text("group", offsets_.group);
+        add_integer("geometryType", offsets_.geometry_type);
+        add_integer("createdFromPour", offsets_.created_from_pour);
+        add_floating("lengthDirectionX", offsets_.length_direction_x);
+        add_floating("lengthDirectionY", offsets_.length_direction_y);
+        add_floating("lengthDirectionZ", offsets_.length_direction_z);
+        add_integer("layerNumber", offsets_.layer_number);
+        add_floating("additionalOffset", offsets_.additional_offset);
+        add_integer("offsetType", offsets_.offset_type);
+        add_text("surfaceType", offsets_.surface_type);
+        ++object_count;
+      }
+      if (!properties_.empty()) {
+        return Result<BatchView>::success(
+            BatchView{.kind = BatchKind::properties, .properties = properties_});
+      }
+    }
+    return Result<BatchView>::success(BatchView{.kind = BatchKind::end});
+  }
+
+ private:
+  std::shared_ptr<const ModelStorage> storage_;
+  const TableLayout* objects_ = nullptr;
+  const TableSchema* schema_ = nullptr;
+  SurfaceObjectOffsets offsets_;
+  std::size_t object_batch_size_ = 0U;
+  std::uint64_t row_ = 0U;
+  std::vector<PropertyView> properties_;
+};
+
 struct PourObjectOffsets {
   std::uint32_t id = 0U;
   std::uint32_t object_class = 0U;
@@ -1931,6 +2081,63 @@ class RebarSemanticReader final : public BatchReader {
       attribute_id->offset, std::move(decoded), batch_size_for(request, 512U)));
 }
 
+[[nodiscard]] const TableSchema* find_surface_object_table(const ModelStorage& storage,
+                                                           const Schema& schema) {
+  constexpr std::array<std::string_view, 4> names{"surface_object", "old_surface_object_961",
+                                                  "old_surface_object_824", "surface_object_816"};
+  for (const auto name : names) {
+    const auto* table = schema.find_table(name);
+    if (table != nullptr && table->ordinal < storage.layout.tables.size() &&
+        storage.layout.tables[table->ordinal].info.row_count != 0U) {
+      return table;
+    }
+  }
+  return nullptr;
+}
+
+[[nodiscard]] Result<ProcessStream> make_surface_object_semantic_stream(
+    std::shared_ptr<const ModelStorage> storage, const Schema& schema,
+    const ProcessRequest& request) {
+  const auto* table = find_surface_object_table(*storage, schema);
+  if (table == nullptr) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The surface-object table is unavailable."});
+  }
+  const auto* id = find_field(schema, *table, "id");
+  const auto* object_class = find_field(schema, *table, "obj_class");
+  if (id == nullptr || object_class == nullptr || id->type != FieldType::u32 ||
+      object_class->type != FieldType::u32) {
+    return Result<ProcessStream>::failure(
+        {ErrorCode::schema_mismatch, "The surface-object semantic layout is incomplete."});
+  }
+  const auto checked_field = [&](std::string_view name, FieldType type) -> const FieldSchema* {
+    const auto* field = find_field(schema, *table, name);
+    return field != nullptr && field->type == type &&
+                   field->offset + field->size <= table->tuple_size
+               ? field
+               : nullptr;
+  };
+  const auto* additional_offset = checked_field("additional_offset", FieldType::f64);
+  if (additional_offset == nullptr) additional_offset = checked_field("offset", FieldType::f64);
+  return Result<ProcessStream>::success(std::make_unique<SurfaceObjectSemanticReader>(
+      storage, storage->layout.tables[table->ordinal], *table,
+      SurfaceObjectOffsets{
+          .id = id->offset,
+          .object_class = object_class->offset,
+          .name = checked_field("name", FieldType::text),
+          .group = checked_field("group", FieldType::text),
+          .geometry_type = checked_field("geometry_type", FieldType::u32),
+          .created_from_pour = checked_field("created_from_pour", FieldType::u32),
+          .length_direction_x = checked_field("length_direction_x", FieldType::f64),
+          .length_direction_y = checked_field("length_direction_y", FieldType::f64),
+          .length_direction_z = checked_field("length_direction_z", FieldType::f64),
+          .layer_number = checked_field("layer_number", FieldType::u32),
+          .additional_offset = additional_offset,
+          .offset_type = checked_field("offset_type", FieldType::u32),
+          .surface_type = checked_field("surface_type", FieldType::text)},
+      batch_size_for(request, 512U)));
+}
+
 [[nodiscard]] Result<ProcessStream> make_pour_object_semantic_stream(
     std::shared_ptr<const ModelStorage> storage, const Schema& schema,
     const ProcessRequest& request) {
@@ -2365,6 +2572,11 @@ Result<ProcessStream> make_property_stream(std::shared_ptr<const ModelStorage> s
     if (!surfaces) return Result<ProcessStream>::failure(surfaces.error());
     streams.push_back(std::move(surfaces.value()));
   }
+  if (find_surface_object_table(*storage, schema) != nullptr) {
+    auto surface_objects = make_surface_object_semantic_stream(storage, schema, request);
+    if (!surface_objects) return Result<ProcessStream>::failure(surface_objects.error());
+    streams.push_back(std::move(surface_objects.value()));
+  }
   const auto* pour_object_schema = schema.find_table("pour_object");
   if (pour_object_schema != nullptr &&
       pour_object_schema->ordinal < storage->layout.tables.size() &&
@@ -2653,11 +2865,45 @@ Result<ProcessStream> make_semantic_relation_stream(std::shared_ptr<const ModelS
         rebar_splices.end());
   }
 
+  std::vector<SurfaceObjectHost> surface_objects;
+  const auto* surface_object_schema = find_surface_object_table(*storage, schema);
+  if (surface_object_schema != nullptr) {
+    auto id = required_field(schema, *surface_object_schema, "id", FieldType::u32);
+    const auto* related_part = find_field(schema, *surface_object_schema, "related_part_id");
+    if (!id) return Result<ProcessStream>::failure(id.error());
+    if (related_part != nullptr && related_part->type == FieldType::u32 &&
+        related_part->offset + related_part->size <= surface_object_schema->tuple_size) {
+      const auto& layout = storage->layout.tables[surface_object_schema->ordinal];
+      surface_objects.reserve(static_cast<std::size_t>(layout.info.row_count));
+      for (std::uint64_t row = 0U; row < layout.info.row_count; ++row) {
+        const auto record = layout.record(payload, row);
+        if (record.empty()) {
+          return Result<ProcessStream>::failure(
+              {ErrorCode::invalid_container, "A surface-object record lies outside the payload."});
+        }
+        if ((std::to_integer<std::uint8_t>(record[0]) & 0x08U) != 0U) continue;
+        const auto tuple = record.subspan(1U, surface_object_schema->tuple_size);
+        const SurfaceObjectHost object{.surface_object_id = read_u32(tuple, id.value()->offset),
+                                       .host_id = read_u32(tuple, related_part->offset)};
+        if (object.surface_object_id != 0U && object.host_id != 0U &&
+            object.surface_object_id != object.host_id) {
+          surface_objects.push_back(object);
+        }
+      }
+      std::ranges::sort(surface_objects, {}, [](const auto& object) {
+        return std::pair{object.surface_object_id, object.host_id};
+      });
+      surface_objects.erase(std::unique(surface_objects.begin(), surface_objects.end()),
+                            surface_objects.end());
+    }
+  }
+
   return Result<ProcessStream>::success(std::make_unique<SemanticRelationReader>(
       std::move(storage), std::move(objects), std::move(endpoints), relation_layout,
       relation_schema, relation_offsets, joint_layout, joint_schema, joint_offsets,
       std::move(assembly_order), std::move(main_members), std::move(assembly_members),
-      std::move(pour_memberships), std::move(rebar_splices), batch_size_for(request, 48)));
+      std::move(pour_memberships), std::move(rebar_splices), std::move(surface_objects),
+      batch_size_for(request, 48)));
 }
 
 Result<ProcessStream> make_instance_stream(std::shared_ptr<const ModelStorage> storage,
