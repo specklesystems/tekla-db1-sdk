@@ -4166,10 +4166,97 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     }
   }
 
+  // Channel and T-section catalog contours must share the I-section axis
+  // convention: HEIGHT on the local y axis, the channel web towards local -z,
+  // and the T flange towards local +y (ENG-9226).
+  constexpr std::string_view asymmetric_lis_profiles =
+      "PROFILE DATABASE EXPORT VERSION = 3\n"
+      "PROFILE_NAME = \"TEST-U\";\n"
+      "{ TYPE = 4; {\n"
+      "\"HEIGHT\" 200\n"
+      "\"WIDTH\" 90\n"
+      "\"WEB_THICKNESS\" 10\n"
+      "\"FLANGE_THICKNESS\" 15\n"
+      "} }\n"
+      "PROFILE_NAME = \"TEST-T\";\n"
+      "{ TYPE = 10; {\n"
+      "\"HEIGHT\" 200\n"
+      "\"WIDTH\" 100\n"
+      "\"WEB_THICKNESS\" 10\n"
+      "\"FLANGE_THICKNESS\" 20\n"
+      "} }\n";
+  for (const auto& [profile, expected_bounds, landmark, forbidden] :
+       std::array<std::tuple<std::string_view, std::array<float, 6>, std::array<float, 2>,
+                             std::array<float, 2>>,
+                  2>{
+           // Web inner corner on the -z half; its image under the opposite
+           // rotation direction (web towards +z) must be absent.
+           std::tuple{"TEST-U", std::array<float, 6>{10.0F, -80.0F, -15.0F, 1010.0F, 120.0F, 75.0F},
+                      std::array<float, 2>{105.0F, -5.0F}, std::array<float, 2>{-65.0F, 65.0F}},
+           // Flange inner corner near the +y top; a stem-up tee would not
+           // produce this vertex.
+           std::tuple{"TEST-T", std::array<float, 6>{10.0F, -80.0F, -20.0F, 1010.0F, 120.0F, 80.0F},
+                      std::array<float, 2>{100.0F, 35.0F}, std::array<float, 2>{-60.0F, 35.0F}}}) {
+    const auto asymmetric_bytes = database_with_one_object(profile);
+    ModelPackage asymmetric_package;
+    asymmetric_package.add(Asset::copy(AssetRole::model_database, "lis.db1", asymmetric_bytes));
+    asymmetric_package.add(Asset::copy(AssetRole::catalog_snapshot, "Template/PG.lis",
+                                       std::as_bytes(std::span(asymmetric_lis_profiles))));
+    auto asymmetric_model = open(std::move(asymmetric_package));
+    CHECK(asymmetric_model.has_value(), "the asymmetric LIS profile fixture opens");
+    if (!asymmetric_model) continue;
+    ProcessRequest request;
+    request.stages = Stage::display_geometry;
+    auto processed = asymmetric_model.value().process(request);
+    CHECK(processed.has_value(), "asymmetric LIS profile processing is available");
+    if (!processed) continue;
+    auto batch = processed.value()->next();
+    bool matches_expected_geometry = false;
+    bool has_landmark = false;
+    bool has_forbidden = false;
+    if (batch.has_value() && batch.value().kind == BatchKind::meshes &&
+        batch.value().meshes.size() == 1) {
+      const auto& mesh = batch.value().meshes.front();
+      std::array<float, 6> actual{mesh.positions[0], mesh.positions[1], mesh.positions[2],
+                                  mesh.positions[0], mesh.positions[1], mesh.positions[2]};
+      for (std::size_t index = 0; index < mesh.positions.size(); index += 3) {
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          actual[axis] = std::min(actual[axis], mesh.positions[index + axis]);
+          actual[axis + 3] = std::max(actual[axis + 3], mesh.positions[index + axis]);
+        }
+        const float y = mesh.positions[index + 1];
+        const float z = mesh.positions[index + 2];
+        has_landmark |= std::abs(y - landmark[0]) < 1.0e-3F && std::abs(z - landmark[1]) < 1.0e-3F;
+        has_forbidden |=
+            std::abs(y - forbidden[0]) < 1.0e-3F && std::abs(z - forbidden[1]) < 1.0e-3F;
+      }
+      matches_expected_geometry = mesh.positions.size() == 48U && mesh.indices.size() == 84U &&
+                                  actual == expected_bounds;
+      if (!matches_expected_geometry || !has_landmark || has_forbidden) {
+        std::printf(
+            "profile %.*s: positions=%zu indices=%zu bounds=[%.9g,%.9g,%.9g,%.9g,%.9g,%.9g]\n",
+            static_cast<int>(profile.size()), profile.data(), mesh.positions.size(),
+            mesh.indices.size(), actual[0], actual[1], actual[2], actual[3], actual[4], actual[5]);
+      }
+    }
+    CHECK(matches_expected_geometry,
+          "an asymmetric LIS section extrudes with HEIGHT on the local y axis");
+    CHECK(has_landmark && !has_forbidden,
+          "an asymmetric LIS section keeps its web on the conventional side");
+  }
+
   for (const auto& [profile, positions, indices, expected_bounds] :
-       std::array<std::tuple<std::string_view, std::size_t, std::size_t, std::array<float, 6>>, 39>{
+       std::array<std::tuple<std::string_view, std::size_t, std::size_t, std::array<float, 6>>, 42>{
            std::tuple{"IPE200", 168U, 324U,
                       std::array<float, 6>{10.0F, -80.0F, -20.0F, 1010.0F, 120.0F, 80.0F}},
+           // The 12-point IPE entries were transposed (width on the height
+           // axis) until ENG-9226; keep asserting height-first bounds.
+           std::tuple{"IPE100", 72U, 132U,
+                      std::array<float, 6>{10.0F, -30.0F, 2.5F, 1010.0F, 70.0F, 57.5F}},
+           std::tuple{"IPE220", 72U, 132U,
+                      std::array<float, 6>{10.0F, -90.0F, -25.0F, 1010.0F, 130.0F, 85.0F}},
+           std::tuple{"IPE300", 72U, 132U,
+                      std::array<float, 6>{10.0F, -130.0F, -45.0F, 1010.0F, 170.0F, 105.0F}},
            std::tuple{"HEA120", 168U, 324U,
                       std::array<float, 6>{10.0F, -37.0F, -30.0F, 1010.0F, 77.0F, 90.0F}},
            std::tuple{"HEB220", 168U, 324U,

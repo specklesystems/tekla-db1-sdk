@@ -14,9 +14,11 @@ struct StandardProfileMetrics {
   double width = 0.0;
 };
 
-// Exact display contours for common, standardized hot-rolled sections. Model-
-// local catalog assets remain authoritative and are consulted before this
-// built-in fallback.
+// Exact display contours for common, standardized hot-rolled sections,
+// captured from evaluated viewer sections (HEIGHT on coordinate 0). These are
+// consulted before model-local catalog assets: the parametric contours
+// reconstructed from LIS records lack the fillets and flange tapers preserved
+// here.
 [[nodiscard]] std::optional<std::span<const std::array<double, 2>>> standard_profile_contour(
     std::string_view name) noexcept;
 

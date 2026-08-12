@@ -156,14 +156,21 @@ namespace {
     if (!web || !flange || *web <= 0.0 || *flange <= 0.0 || *web >= width ||
         2.0 * *flange >= height)
       return std::nullopt;
-    result.outer = {{-width / 2.0, -height / 2.0},
-                    {width / 2.0, -height / 2.0},
-                    {width / 2.0, -height / 2.0 + *flange},
-                    {-width / 2.0 + *web, -height / 2.0 + *flange},
-                    {-width / 2.0 + *web, height / 2.0 - *flange},
-                    {width / 2.0, height / 2.0 - *flange},
-                    {width / 2.0, height / 2.0},
-                    {-width / 2.0, height / 2.0}};
+    const std::array<std::array<double, 2>, 8> conventional{
+        {{-width / 2.0, -height / 2.0},
+         {width / 2.0, -height / 2.0},
+         {width / 2.0, -height / 2.0 + *flange},
+         {-width / 2.0 + *web, -height / 2.0 + *flange},
+         {-width / 2.0 + *web, height / 2.0 - *flange},
+         {width / 2.0, height / 2.0 - *flange},
+         {width / 2.0, height / 2.0},
+         {-width / 2.0, height / 2.0}}};
+    result.outer.reserve(conventional.size());
+    // Rotate so HEIGHT lands on coordinate 0 with the web on the negative
+    // coordinate-1 side, matching the evaluated U220 section oracle.
+    for (const auto coordinate : conventional) {
+      result.outer.push_back({-coordinate[1], coordinate[0]});
+    }
   } else if (type == 5) {
     result.outer = {{-height / 2.0, -width / 2.0},
                     {height / 2.0, -width / 2.0},
@@ -196,14 +203,22 @@ namespace {
     const auto flange = property(record, "FLANGE_THICKNESS");
     if (!web || !flange || *web <= 0.0 || *flange <= 0.0 || *web >= width || *flange >= height)
       return std::nullopt;
-    result.outer = {{-width / 2.0, -height / 2.0},
-                    {width / 2.0, -height / 2.0},
-                    {width / 2.0, -height / 2.0 + *flange},
-                    {*web / 2.0, -height / 2.0 + *flange},
-                    {*web / 2.0, height / 2.0},
-                    {-*web / 2.0, height / 2.0},
-                    {-*web / 2.0, -height / 2.0 + *flange},
-                    {-width / 2.0, -height / 2.0 + *flange}};
+    const std::array<std::array<double, 2>, 8> conventional{
+        {{-width / 2.0, -height / 2.0},
+         {width / 2.0, -height / 2.0},
+         {width / 2.0, -height / 2.0 + *flange},
+         {*web / 2.0, -height / 2.0 + *flange},
+         {*web / 2.0, height / 2.0},
+         {-*web / 2.0, height / 2.0},
+         {-*web / 2.0, -height / 2.0 + *flange},
+         {-width / 2.0, -height / 2.0 + *flange}}};
+    result.outer.reserve(conventional.size());
+    // Rotate so HEIGHT lands on coordinate 0 with the flange on the positive
+    // coordinate-0 side (stem towards negative), the standard T pictogram
+    // orientation implied by the channel and angle conventions above.
+    for (const auto coordinate : conventional) {
+      result.outer.push_back({-coordinate[1], coordinate[0]});
+    }
   } else {
     return std::nullopt;
   }
