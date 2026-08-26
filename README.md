@@ -202,8 +202,8 @@ specifications, and repeatable tests. See
 
 ## License
 
-No distribution license has been selected yet. Select one before publishing
-the core or any adapter. External dependency terms and redistribution notes are
+This project is licensed under the GNU Affero General Public License v3.0;
+see [LICENSE](LICENSE). External dependency terms and redistribution notes are
 listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Tekla is a trademark of Trimble Inc. This project is independent and is not
