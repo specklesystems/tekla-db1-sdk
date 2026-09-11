@@ -7,7 +7,10 @@ display-geometry batches.
 The library is designed for interoperable, read-only access and does not require
 a Tekla installation at build time or runtime.
 
-> Status: version 0.1.0 release candidate. Native mapped-file input, raw and multi-member gzip
+[Live demo and quickstart](https://specklesystems.github.io/tekla-db1-sdk/) ·
+[Try it on Speckle](https://app.speckle.systems)
+
+> Status: early alpha (0.1.0). Native mapped-file input, raw and multi-member gzip
 > decoding, validated physical-table framing, the public batch interface, and
 > bounded ZIP discovery, generated schemas for model formats 8.74, 8.95,
 > 9.08, 9.21, 9.52, and 9.66
@@ -46,6 +49,9 @@ than byte-identical. See the
 conversion path.
 
 Release-level changes are recorded in the [changelog](CHANGELOG.md).
+
+The repository includes a static demo and quickstart site for GitHub Pages.
+See [the release-site guide](docs/release-site.md) to preview or publish it.
 
 ## Design
 

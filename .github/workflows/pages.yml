@@ -1,0 +1,72 @@
+name: Release site
+
+on:
+  pull_request:
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check JavaScript syntax
+        run: node --check site/site.js
+      - name: Check site assets
+        run: |
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          from urllib.parse import urlsplit
+
+          root = Path('site').resolve()
+          class Assets(HTMLParser):
+              def handle_starttag(self, tag, attributes):
+                  attributes = dict(attributes)
+                  if tag not in ('script', 'link', 'img', 'iframe'):
+                      return
+                  url = attributes.get('src') or attributes.get('href', '')
+                  parsed = urlsplit(url)
+                  if parsed.scheme or parsed.netloc or not parsed.path:
+                      return
+                  asset = (root / parsed.path).resolve()
+                  assert asset.is_relative_to(root) and asset.is_file(), url
+
+          Assets().feed((root / 'index.html').read_text())
+          print('All local assets exist.')
+          PY
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101319" />
+    <meta
+      name="description"
+      content="An open-source parser for Trimble’s Tekla Structures DB1 files and model folders. Extract geometry, object properties, assemblies, connections and host relationships."
+    />
+    <meta property="og:title" content="Tekla DB1 Reader — by Speckle" />
+    <meta
+      property="og:description"
+      content="Parse Tekla Structures files and model folders headlessly. The C++20 SDK Speckle uses for direct Tekla file ingestion, without Trimble Connect."
+    />
+    <meta property="og:type" content="website" />
+    <meta
+      property="og:url"
+      content="https://specklesystems.github.io/tekla-db1-sdk/"
+    />
+    <title>Tekla DB1 Reader — by Speckle</title>
+    <link
+      rel="canonical"
+      href="https://specklesystems.github.io/tekla-db1-sdk/"
+    />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='8' fill='%23136cff'/%3E%3Ctext x='20' y='27' text-anchor='middle' font-family='monospace' font-size='23' font-weight='700' fill='%23ffffff'%3Edb%3C/text%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="header wrap">
+      <a class="brand" href="./" aria-label="Tekla DB1 Reader by Speckle, home"
+        ><img
+          src="./assets/speckle.svg"
+          width="103"
+          height="26"
+          alt="Speckle"
+        /><span class="brand-divider"></span
+        ><span class="brand-product">Tekla DB1 Reader</span></a
+      >
+      <nav aria-label="Main navigation">
+        <a href="#capabilities">What it extracts</a>
+        <a href="#quickstart">Quickstart</a>
+        <a
+          class="repo-link"
+          href="https://github.com/specklesystems/tekla-db1-sdk"
+          >GitHub <span aria-hidden="true">↗</span></a
+        >
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-grid wrap">
+          <div class="hero-copy">
+            <p class="eyebrow">
+              <span class="file-mark">.db1</span> OPEN SOURCE · BY SPECKLE
+            </p>
+            <h1 id="hero-title">
+              Tekla Structures<br /><span>file parser.</span>
+            </h1>
+            <p class="hero-description">
+              An open-source parser for
+              <a
+                class="prose-link"
+                href="https://www.trimble.com/en/products/tekla/structures"
+                >Trimble’s Tekla Structures</a
+              >
+              DB1 files and model folders. Extract geometry and object
+              properties, together with assemblies, connections and host
+              relationships.
+            </p>
+            <p class="hero-description hero-runtime">
+              Run it headlessly in a server or batch process, without a Tekla
+              Structures installation.
+            </p>
+            <div class="hero-actions">
+              <a class="button button-primary" href="#quickstart"
+                >Build the reader <span aria-hidden="true">↗</span></a
+              >
+              <a class="text-link" href="#demo"
+                >Explore the model <span aria-hidden="true">↓</span></a
+              >
+            </div>
+            <div class="hero-tags" aria-label="SDK details">
+              <span>C++20</span><span>Read-only</span><span>AGPL-3.0</span>
+            </div>
+          </div>
+          <div class="model-stage" id="demo">
+            <div class="stage-top">
+              <span class="eyebrow">01 / MODEL PREVIEW</span
+              ><a
+                href="https://next.speckle.dev/projects/426e88ed42/models/22261ad0a6@13cff6be58"
+                target="_blank"
+                rel="noopener noreferrer"
+                >Open in Speckle <span aria-hidden="true">↗</span></a
+              >
+            </div>
+            <iframe
+              title="Sample Office Building parsed from a Tekla Structures DB1 and displayed in Speckle"
+              src="https://next.speckle.dev/projects/426e88ed42/models/22261ad0a6@13cff6be58#embed=%7B%22isEnabled%22%3Atrue%2C%22isTransparent%22%3Atrue%2C%22noScroll%22%3Atrue%7D"
+              allow="fullscreen; clipboard-write"
+              allowfullscreen
+              referrerpolicy="strict-origin-when-cross-origin"
+            ></iframe>
+            <div class="stage-caption">
+              <div>
+                <strong>Sample Office Building</strong
+                ><span>Tekla Structures 2024 · upgraded DB1</span>
+              </div>
+              <p>Drag to orbit.<br />Open in Speckle to inspect.</p>
+            </div>
+          </div>
+        </div>
+        <div class="hero-foot wrap">
+          <span
+            ><a class="prose-link" href="https://speckle.systems">Speckle</a>
+            uses this SDK to parse Tekla Structures files directly, without
+            Trimble Connect.</span
+          ><span>EARLY ALPHA <span class="separator">/</span> v0.1</span>
+        </div>
+      </section>
+
+      <aside class="alpha-callout" aria-label="Release status">
+        <div class="wrap">
+          <p>
+            This is an early alpha release.
+            <a
+              class="prose-link"
+              href="https://github.com/specklesystems/tekla-db1-sdk/blob/main/CONTRIBUTING.md"
+              >Contributions welcome! <span aria-hidden="true">↗</span></a
+            >
+          </p>
+        </div>
+      </aside>
+
+      <section
+        class="capabilities wrap section-space"
+        id="capabilities"
+        aria-labelledby="capabilities-title"
+      >
+        <div class="section-intro">
+          <p class="eyebrow">02 / EXTRACTED DATA</p>
+          <h2 id="capabilities-title">
+            Geometry, properties<br />and model structure.
+          </h2>
+          <p>
+            Use the SDK for headless file conversion, property extraction and
+            model analysis. Process model folders in a server application or
+            batch job, and pass the results to your own viewer or database.
+          </p>
+        </div>
+        <div class="capability-list">
+          <article>
+            <span class="item-number">01</span>
+            <div>
+              <h3>Geometry</h3>
+              <p>
+                Extract meshes, curves and placements for supported beams,
+                plates, imported shapes and reinforcement. Export to GLB or
+                consume the geometry in your own application. Optional OCCT
+                evaluation handles cuts and fittings.
+              </p>
+              <span class="technical-label">MESHES · CURVES · PLACEMENTS</span>
+            </div>
+          </article>
+          <article>
+            <span class="item-number">02</span>
+            <div>
+              <h3>Object properties</h3>
+              <p>
+                Read stable object IDs and typed property values, including part
+                names, profiles, materials, classes and user-defined attributes.
+                Property batches can be processed independently of display
+                geometry.
+              </p>
+              <span class="technical-label"
+                >IDENTITIES · PROPERTIES · MATERIALS</span
+              >
+            </div>
+          </article>
+          <article>
+            <span class="item-number">03</span>
+            <div>
+              <h3>Assemblies, connections and hosts</h3>
+              <p>
+                Recover assembly membership, parent–child structure, supported
+                component connections and reinforcement-to-host relationships.
+                These relationships link the extracted objects to the structure
+                stored in the source model.
+              </p>
+              <span class="technical-label"
+                >ASSEMBLIES · CONNECTIONS · HOSTS</span
+              >
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section
+        class="quickstart section-space"
+        id="quickstart"
+        aria-labelledby="quickstart-title"
+      >
+        <div class="wrap">
+          <div class="quickstart-heading">
+            <div>
+              <p class="eyebrow">03 / COMMAND-LINE USAGE</p>
+              <h2 id="quickstart-title">
+                Parse a DB1<br />from the command line.
+              </h2>
+            </div>
+            <p>
+              Build the C++ tools, then point them at the DB1 in a model folder.
+              Inspect the model’s contents or export its supported geometry to
+              GLB.
+            </p>
+          </div>
+          <div class="quickstart-grid">
+            <div class="step-copy">
+              <span class="step-label">STEP 01</span>
+              <h3>Build the SDK</h3>
+              <p>
+                You’ll need a C++20 compiler, CMake 3.25+, Ninja and zlib. The
+                core builds on Linux, macOS and Windows.
+              </p>
+              <a
+                class="inline-link"
+                href="https://github.com/specklesystems/tekla-db1-sdk#build"
+                >Build documentation <span aria-hidden="true">↗</span></a
+              >
+            </div>
+            <div class="code-panel">
+              <div class="code-header">
+                <span>Terminal</span
+                ><button
+                  class="copy-button"
+                  type="button"
+                  data-copy="build-code"
+                  aria-label="Copy SDK build commands"
+                >
+                  Copy
+                </button>
+              </div>
+              <pre><code id="build-code">git clone https://github.com/specklesystems/tekla-db1-sdk.git
+cd tekla-db1-sdk
+cmake --preset release
+cmake --build --preset release
+ctest --preset release</code></pre>
+            </div>
+            <div class="step-copy">
+              <span class="step-label">STEP 02</span>
+              <h3>Inspect a DB1 or export a GLB</h3>
+              <p>
+                Point the tools at a DB1 in its original model folder. Keep
+                adjacent catalogs and shape assets together so the reader can
+                discover them.
+              </p>
+              <p class="small-note">
+                These commands run locally. The model above is a hosted preview.
+              </p>
+            </div>
+            <div class="code-panel">
+              <div class="code-header">
+                <span>Terminal</span
+                ><button
+                  class="copy-button"
+                  type="button"
+                  data-copy="inspect-code"
+                  aria-label="Copy model inspection commands"
+                >
+                  Copy
+                </button>
+              </div>
+              <pre><code id="inspect-code"># Summarise objects, properties and relationships
+build/release/tools/tekla-db1-inspect /path/to/model.db1 --semantics
+
+# Export supported display geometry to GLB
+build/release/tools/tekla-db1-glb /path/to/model.db1 preview.glb</code></pre>
+              <div class="code-note">
+                Base build. For evaluated cuts and fittings, use the
+                <a
+                  href="https://github.com/specklesystems/tekla-db1-sdk/blob/main/docs/occt-execution.md"
+                  >OCCT-enabled build</a
+                >.
+              </div>
+            </div>
+          </div>
+          <div class="developer-link">
+            <span>To process the data in your own application:</span
+            ><a
+              href="https://github.com/specklesystems/tekla-db1-sdk/blob/main/docs/external-adapters.md"
+              >Use the C++ batch interface <span aria-hidden="true">↗</span></a
+            >
+          </div>
+        </div>
+      </section>
+
+      <section
+        class="support wrap section-space"
+        id="support"
+        aria-labelledby="support-title"
+      >
+        <div>
+          <p class="eyebrow">04 / FORMAT SUPPORT</p>
+          <h2 id="support-title">Supported formats<br />and limitations.</h2>
+          <p>
+            The reader handles the database formats listed here. Geometry
+            coverage varies by object type. Unsupported variants are reported
+            through errors or diagnostics.
+          </p>
+          <a
+            class="inline-link"
+            href="https://github.com/specklesystems/tekla-db1-sdk/blob/main/docs/support-matrix.md"
+            >Read the full support matrix <span aria-hidden="true">↗</span></a
+          >
+        </div>
+        <div class="support-details">
+          <dl>
+            <div>
+              <dt>Database formats</dt>
+              <dd>8.74 · 8.95 · 9.08 · 9.21 · 9.52 · 9.66</dd>
+            </div>
+            <div>
+              <dt>Distribution</dt>
+              <dd>C++20 source and static CMake libraries</dd>
+            </div>
+            <div>
+              <dt>Licence</dt>
+              <dd>
+                <a
+                  href="https://github.com/specklesystems/tekla-db1-sdk/blob/main/LICENSE"
+                  >GNU AGPL v3.0 <span aria-hidden="true">↗</span></a
+                >
+              </dd>
+            </div>
+            <div>
+              <dt>Compatibility</dt>
+              <dd>
+                The C++ API may change before v1.0. Some geometry types are not
+                implemented; full Tekla Structures visual parity is not yet
+                available.
+              </dd>
+            </div>
+          </dl>
+          <p class="small-note">
+            Some custom profiles, reinforcement variants, complete bolt
+            assemblies and component regeneration remain unsupported. See the
+            support matrix for exact coverage.
+          </p>
+        </div>
+      </section>
+
+      <section class="try-now" id="try-now" aria-labelledby="try-now-title">
+        <div class="wrap">
+          <div class="try-now-heading">
+            <div>
+              <p class="eyebrow">05 / TRY IT ON SPECKLE</p>
+              <h2 id="try-now-title">Try it now.</h2>
+              <p>
+                Use Speckle to parse your Tekla model and explore the results in
+                your browser.
+              </p>
+            </div>
+            <a class="button button-primary" href="https://app.speckle.systems"
+              >Open Speckle <span aria-hidden="true">↗</span></a
+            >
+          </div>
+          <ol class="try-now-steps">
+            <li>
+              <span class="step-label" aria-hidden="true">STEP 01</span>
+              <h3>Create a model</h3>
+              <p>Sign in to Speckle and create a new model in a project.</p>
+            </li>
+            <li>
+              <span class="step-label" aria-hidden="true">STEP 02</span>
+              <h3>Upload your Tekla model</h3>
+              <p>
+                Upload a Tekla Structures model folder or a
+                <code>.db1</code> file.
+              </p>
+            </li>
+            <li>
+              <span class="step-label" aria-hidden="true">STEP 03</span>
+              <h3>See the results</h3>
+              <p>
+                Explore the geometry and inspect the extracted object
+                properties.
+              </p>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="closing wrap">
+        <div>
+          <p class="eyebrow">C++20 LIBRARY AND COMMAND-LINE TOOLS</p>
+          <h2>Source and documentation</h2>
+        </div>
+        <a
+          class="button button-primary"
+          href="https://github.com/specklesystems/tekla-db1-sdk"
+          >View on GitHub <span aria-hidden="true">↗</span></a
+        >
+      </section>
+    </main>
+    <footer class="footer wrap">
+      <div>
+        <a href="https://speckle.systems" aria-label="Speckle website"
+          ><img
+            src="./assets/speckle.svg"
+            width="103"
+            height="26"
+            alt="Speckle"
+        /></a>
+        <p>Open-source Tekla Structures DB1 parser.</p>
+      </div>
+      <div class="footer-links">
+        <a href="https://speckle.systems"
+          >Speckle homepage <span aria-hidden="true">↗</span></a
+        >
+        <a
+          href="https://github.com/specklesystems/tekla-db1-sdk/blob/main/CHANGELOG.md"
+          >Changelog</a
+        ><a href="https://github.com/specklesystems/tekla-db1-sdk/issues"
+          >Report an issue</a
+        ><a
+          href="https://github.com/specklesystems/tekla-db1-sdk/blob/main/CONTRIBUTING.md"
+          >Contribute</a
+        >
+      </div>
+      <p class="trademark">
+        Tekla is a trademark of Trimble Inc. This project is independent and is
+        not affiliated with or endorsed by Trimble.
+      </p>
+    </footer>
+    <span class="sr-only" role="status" id="copy-status"></span>
+  </body>
+</html>
